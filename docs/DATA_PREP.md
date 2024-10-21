@@ -8,7 +8,7 @@ Download nuScenes V1.0 full dataset data, CAN bus and map(v1.3) extensions [HERE
 ```shell
 cd UniAD
 mkdir data
-# Download nuScenes V1.0 full dataset data directly to (or soft link to) UniAD/data/
+# Download nuScenes V1.0 full dataset data directly to (or soft link to) UniAD/data/nuscenes/
 # Download CAN_bus and Map(v1.3) extensions directly to (or soft link to) UniAD/data/nuscenes/
 ```
 
