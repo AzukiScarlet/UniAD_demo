@@ -275,7 +275,7 @@ model = dict(
                         type='MultiScaleDeformableAttention',
                         embed_dims=_dim_,
                         num_levels=_num_levels_,
-                         ),
+                        ),
                     feedforward_channels=_feed_dim_,
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'ffn', 'norm'))),
@@ -300,7 +300,7 @@ model = dict(
                     feedforward_channels=_feed_dim_,
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
-                                     'ffn', 'norm')
+                                    'ffn', 'norm')
                 ),
             ),
         ),
@@ -338,7 +338,7 @@ model = dict(
             sampler_with_mask =dict(type='PseudoSampler_segformer'),
         ),
     ),
- 
+
     # model training and testing settings
     train_cfg=dict(
         pts=dict(

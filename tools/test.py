@@ -9,7 +9,7 @@ from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
-                         wrap_fp16_model)
+                        wrap_fp16_model)
 
 from mmdet3d.apis import single_gpu_test
 from mmdet3d.datasets import build_dataset
@@ -106,6 +106,7 @@ def parse_args():
 
 
 def main():
+    print("Start testing")
     args = parse_args()
 
     assert args.out or args.eval or args.format_only or args.show \
