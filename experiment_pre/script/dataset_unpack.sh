@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # 定义目标解压目录
-MAPS_DIR="/home2/DATASET_AD/wd2/UniAD/data/nuscenes/maps"
-CAN_BUS_DIR="/home2/DATASET_AD/wd2/UniAD/data/nuscenes"
-FULL_DATASET_DIR="/home2/DATASET_AD/wd2/UniAD/data/nuscenes"
+MAPS_DIR="/home2/DATASET_AD/wd2/uniad/data/nuscenes/maps"
+CAN_BUS_DIR="/home2/DATASET_AD/wd2/uniad/data/nuscenes"
+FULL_DATASET_DIR="/home2/DATASET_AD/wd2/uniad/data/nuscenes"
 
 # 创建目标目录（如果不存在）
 mkdir -p "$MAPS_DIR"
