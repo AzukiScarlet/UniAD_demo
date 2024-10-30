@@ -6,6 +6,7 @@ T=`date +%m%d%H%M` # 日期
 # Usually you only need to customize these variables #
 CFG=$1   # 第一个参数为cfg路径                          #
 GPUS=$2  # 第二个参数为gpu数量                          #
+# GPU_IDS=$3  # 第三个参数为gpu_ids                      #
 # -------------------------------------------------- #
 GPUS_PER_NODE=$(($GPUS<8?$GPUS:8))    # 最大8个gpu
 NNODES=`expr $GPUS / $GPUS_PER_NODE`  # 计算节点数
@@ -25,13 +26,13 @@ fi
 
 # PYTHON 环境变量设置
 PYTHONPATH="$(dirname $0)/..":$PYTHONPATH \
-python -m torch.distributed.launch \          # 分布式训练
+python -m torch.distributed.launch \
     --nproc_per_node=${GPUS_PER_NODE} \
     --master_addr=${MASTER_ADDR} \
     --master_port=${MASTER_PORT} \
     --nnodes=${NNODES} \
     --node_rank=${RANK} \
-    $(dirname "$0")/train.py \         # 训练脚本接受参数：cfg路径、gpu数量，woek_dir
+    $(dirname "$0")/train.py \
     $CFG \
     --launcher pytorch ${@:3} \
     --deterministic \
