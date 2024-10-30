@@ -206,12 +206,16 @@ class PansegformerHead(SegDETRHead):
         """
         _, bs, _ = bev_embed.shape
 
+        # 将BEV特征转换为(N, C, H, W)的形式
         mlvl_feats = [torch.reshape(bev_embed, (bs, self.bev_h, self.bev_w ,-1)).permute(0, 3, 1, 2)]
+        # 创建一个全零的mask
         img_masks = mlvl_feats[0].new_zeros((bs, self.bev_h, self.bev_w))
-
+        # 多层特征和位置编码
+        # 获取每层特征的高度和宽度
         hw_lvl = [feat_lvl.shape[-2:] for feat_lvl in mlvl_feats]
         mlvl_masks = []
         mlvl_positional_encodings = []
+        #* 遍历每层特征，为每层特征生成mask和位置编码
         for feat in mlvl_feats:
             mlvl_masks.append(
                 F.interpolate(img_masks[None],
@@ -219,21 +223,27 @@ class PansegformerHead(SegDETRHead):
             mlvl_positional_encodings.append(
                 self.positional_encoding(mlvl_masks[-1]))
 
-        query_embeds = None
+        #? 为什么as_two_stage训练不需要query_embedding，而一阶段训练需要
+        #* 不是as_two_stage使用可学习单独的Query Embedding
+        #* as_two_stage使用encoder的最后一层输出的Q作为Query_embedding
+        #* 但是默认base_track_map.py和base_e2e.py中的配置都是as_two_stage=False
+        query_embeds = None  #* 初始化查询嵌入
         if not self.as_two_stage:
             query_embeds = self.query_embedding.weight
+        #* 进行Transformer的前向传播
         (memory, memory_pos, memory_mask, query_pos), hs, init_reference, inter_references, \
         enc_outputs_class, enc_outputs_coord = self.transformer(
-            mlvl_feats,
-            mlvl_masks,
-            query_embeds,
-            mlvl_positional_encodings,
-            reg_branches=self.reg_branches if self.with_box_refine else None,  # noqa:E501
-            cls_branches=self.cls_branches if self.as_two_stage else None  # noqa:E501
+            mlvl_feats,           # BEV特征 Q
+            mlvl_masks,           # BEV mask
+            query_embeds,         # 查询嵌入,Q
+            mlvl_positional_encodings,  # 位置编码
+            reg_branches=self.reg_branches if self.with_box_refine else None,  # noqa:E501 # 回归分支 
+            cls_branches=self.cls_branches if self.as_two_stage else None  # noqa:E501     # 分类分支
         )
 
-        memory = memory.permute(1, 0, 2)
-        query = hs[-1].permute(1, 0, 2)
+        #* 输出处理
+        memory = memory.permute(1, 0, 2)             # encoder部分的Q
+        query = hs[-1].permute(1, 0, 2)              # 取最后一个解码层的Q为输出的Q
         query_pos = query_pos.permute(1, 0, 2)
         memory_pos = memory_pos.permute(1, 0, 2)
 
@@ -243,6 +253,7 @@ class PansegformerHead(SegDETRHead):
         hs = hs.permute(0, 2, 1, 3)
         outputs_classes = []
         outputs_coords = []
+        # 遍历每个解码层，计算分类和回归输出
         for lvl in range(hs.shape[0]):
             if lvl == 0:
                 reference = init_reference
@@ -1082,9 +1093,10 @@ class PansegformerHead(SegDETRHead):
         Returns:
             tuple:
                 - losses_seg (torch.Tensor): Total segmentation loss.
-                - pred_seg_dict (dict): Dictionary of predicted segmentation outputs.
+                - pred_seg_dict (dict): Dictionary of predicted segmentation outputs. (输出分类，坐标，encoder分类，encoder坐标，args_tuple，参考)
+                其中args_tuple是一个元组，包含了(memory, memory_mask, memory_pos, **query**, _, query_pos, hw_lvl)
         """
-        pred_seg_dict = self(bev_feat)
+        pred_seg_dict = self(bev_feat)      #* self()进行一次forward()操作
         loss_inputs = [
             pred_seg_dict['outputs_classes'],
             pred_seg_dict['outputs_coords'],

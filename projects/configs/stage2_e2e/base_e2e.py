@@ -24,43 +24,51 @@ class_names = [
     "pedestrian",
     "traffic_cone",
 ]
-vehicle_id_list = [0, 1, 2, 3, 4, 6, 7]
-group_id_list = [[0,1,2,3,4], [6,7], [8], [5,9]]
+
+vehicle_id_list = [0, 1, 2, 3, 4, 6, 7]     #* 车辆类别 class_names 中的索引
+group_id_list = [[0,1,2,3,4], [6,7], [8], [5,9]] # 车辆类别的分组：机动车、非机动车、行人、障碍物
+
+# 输入模态：使用相机和外部信息
 input_modality = dict(
     use_lidar=False, use_camera=True, use_radar=False, use_map=False, use_external=True
 )
-_dim_ = 256
-_pos_dim_ = _dim_ // 2
-_ffn_dim_ = _dim_ * 2
-_num_levels_ = 4
-bev_h_ = 200
+
+_dim_ = 256  # 基础维度
+_pos_dim_ = _dim_ // 2  # 位置维度 
+_ffn_dim_ = _dim_ * 2   # 前馈网络维度
+_num_levels_ = 4        # 多头注意力的数量
+bev_h_ = 200            
 bev_w_ = 200
-_feed_dim_ = _ffn_dim_
-_dim_half_ = _pos_dim_
-canvas_size = (bev_h_, bev_w_)
+_feed_dim_ = _ffn_dim_  # 前馈网络输入维度
+_dim_half_ = _pos_dim_  # 位置维度的一半
+canvas_size = (bev_h_, bev_w_)  # 鸟瞰图尺寸
+
+
+# NOTE: 您可以将队列长度从 5 更改为 3 来节省 GPU 内存，但可能会影响性能。
 queue_length = 3  # each sequence contains `queue_length` frames.
 
-### traj prediction args ###
-predict_steps = 12
-predict_modes = 6
-fut_steps = 4
-past_steps = 4
-use_nonlinear_optimizer = True
+###* 轨迹预测参数 ###
+predict_steps = 12      #* 预测未来步数
+predict_modes = 6       #* 预测6种模式
+fut_steps = 4           # 未来步数
+past_steps = 4          # 过去步数
+use_nonlinear_optimizer = True         #* 训练时使用非线性优化器
 
-## occflow setting	
-occ_n_future = 4	
-occ_n_future_plan = 6	
+
+##* Occ流参数	
+occ_n_future = 4	     # 交互流的未来步数      
+occ_n_future_plan = 6    # 规划的未来步数
 occ_n_future_max = max([occ_n_future, occ_n_future_plan])	
 
-### planning ###
-planning_steps = 6
-use_col_optim = True
+###* 规划 ###
+planning_steps = 6         # 规划步数
+use_col_optim = True       #* 使用碰撞优化(牛顿法再优化)
 # there exists multiple interpretations of the planning metric, where it differs between uniad and stp3/vad
 # uniad: computed at a particular time (e.g., L2 distance between the predicted and ground truth future trajectory at time 3.0s)
 # stp3: computed as the average up to a particular time (e.g., average L2 distance between the predicted and ground truth future trajectory up to 3.0s)
 planning_evaluation_strategy = "uniad"  # uniad or stp3
 
-### Occ args ### 
+###* Occ 范围和步长 ### 
 occflow_grid_conf = {
     'xbound': [-50.0, 50.0, 0.5],
     'ybound': [-50.0, 50.0, 0.5],
@@ -68,32 +76,38 @@ occflow_grid_conf = {
 }
 
 # Other settings
-train_gt_iou_threshold=0.3
+train_gt_iou_threshold=0.3 # 训练时的IoU阈值
 
+#* 模型设置################################################################
 model = dict(
     type="UniAD",
     gt_iou_threshold=train_gt_iou_threshold,
     queue_length=queue_length,
-    use_grid_mask=True,
-    video_test_mode=True,
-    num_query=900,
-    num_classes=10,
-    vehicle_id_list=vehicle_id_list,
+    use_grid_mask=True,       # 使用网格掩码
+    video_test_mode=True,     # 视频测试模式
+    num_query=900,            # 查询数量
+    num_classes=10,           # 类别数量, nuscenes中有10个类别
+    vehicle_id_list=vehicle_id_list,   #* 车辆类别索引
     pc_range=point_cloud_range,
+    
+    # 图像主干网络配置
     img_backbone=dict(
-        type="ResNet",
+        type="ResNet",         #* 残差网络
         depth=101,
-        num_stages=4,
+        num_stages=4,          # 网络阶段数
         out_indices=(1, 2, 3),
         frozen_stages=4,
         norm_cfg=dict(type="BN2d", requires_grad=False),
         norm_eval=True,
         style="caffe",
+        # 可变性卷积网络
         dcn=dict(
             type="DCNv2", deform_groups=1, fallback_on_stride=False
         ),  # original DCNv2 will print log when perform load_state_dict
         stage_with_dcn=(False, False, True, True),
     ),
+
+    # 图像颈部网络配置
     img_neck=dict(
         type="FPN",
         in_channels=[512, 1024, 2048],
@@ -103,12 +117,18 @@ model = dict(
         num_outs=4,
         relu_before_extra_convs=True,
     ),
+
+    #* 冻结相关网络的配置，第二阶段BEV相关的encoder被冻结，参数不再更新
     freeze_img_backbone=True,
-    freeze_img_neck=True,
-    freeze_bn=True,
-    freeze_bev_encoder=True,
+    freeze_img_neck=True,      #* 第二阶段冻结图像颈部网络
+    freeze_bn=True,            #* 冻结BN层
+    freeze_bev_encoder=True,   #****** 冻结BEV编码器
+    
+    # 得分阈值
     score_thresh=0.4,
     filter_score_thresh=0.35,
+
+    # 查询交互模块
     qim_args=dict(
         qim_type="QIMBase",
         merger_dropout=0,
@@ -116,11 +136,14 @@ model = dict(
         fp_ratio=0.3,
         random_drop=0.1,
     ),  # hyper-param for query dropping mentioned in MOTR
+    
+    # encoder的记忆模块
     mem_args=dict(
         memory_bank_type="MemoryBank",
         memory_bank_score_thresh=0.0,
         memory_bank_len=4,
     ),
+    #* 轨迹跟踪损失函数配置
     loss_cfg=dict(
         type="ClipMatcher",
         num_classes=10,
@@ -137,6 +160,8 @@ model = dict(
         ),
         loss_bbox=dict(type="L1Loss", loss_weight=0.25),
     ),  # loss cfg for tracking
+    
+    #* 轨迹跟踪头配置：TrackFormer
     pts_bbox_head=dict(
         type="BEVFormerTrackHead",
         bev_h=bev_h_,
@@ -144,17 +169,23 @@ model = dict(
         num_query=900,
         num_classes=10,
         in_channels=_dim_,
-        sync_cls_avg_factor=True,
-        with_box_refine=True,
-        as_two_stage=False,
+        sync_cls_avg_factor=True,    # 同步类别平均因子
+        with_box_refine=True,        # 使用盒子细化
+        as_two_stage=False,          #* 不进行两阶段检测
         past_steps=past_steps,
         fut_steps=fut_steps,
+
+        #* 感知的transformer配置
+        #* encoder生成BEV；decoder生成track特征
         transformer=dict(
             type="PerceptionTransformer",
-            rotate_prev_bev=True,
+            rotate_prev_bev=True,         # 预先旋转BEV
             use_shift=True,
-            use_can_bus=True,
+            use_can_bus=True,             # 调用can_bus总线数据
             embed_dims=_dim_,
+
+            #* encoder部分
+            # 6层，每一层：TemporalSelfAttention-norm-SpatialCrossAttention-norm-前馈网络-norm
             encoder=dict(
                 type="BEVFormerEncoder",
                 num_layers=6,
@@ -163,13 +194,20 @@ model = dict(
                 return_intermediate=False,
                 transformerlayers=dict(
                     type="BEVFormerLayer",
+                    # 注意力配置
+                    #* attn_cfgs中的attn_cfg[i]会被自动映射到operation_order中的各个attn操作中
+                    # eg: operation_order=("self_attn", "norm", "cross_attn", "norm", "ffn", "norm")
+                    #    attn_cfgs[0] -> self_attn, attn_cfgs[1] -> cross_attn
+                    # 最终执行为 TemporalSelfAttention -> norm -> SpatialCrossAttention -> norm -> FeedForward -> norm
                     attn_cfgs=[
                         dict(
                             type="TemporalSelfAttention", embed_dims=_dim_, num_levels=1
                         ),
+                        # 空间交叉注意力, 空间维度的交叉注意力agent-agent，内部使用可变形注意力
                         dict(
                             type="SpatialCrossAttention",
                             pc_range=point_cloud_range,
+                            # 内部使用可变形注意力
                             deformable_attention=dict(
                                 type="MSDeformableAttention3D",
                                 embed_dims=_dim_,
@@ -181,6 +219,9 @@ model = dict(
                     ],
                     feedforward_channels=_ffn_dim_,
                     ffn_dropout=0.1,
+                    ##########* 操作顺序##########
+                    # 每个网络不同配置的核心
+                    # 自注意力-norm-交叉注意力-norm-前馈网络-norm
                     operation_order=(
                         "self_attn",
                         "norm",
@@ -191,19 +232,24 @@ model = dict(
                     ),
                 ),
             ),
+            #* decoder部分
+            # 6层，每一层：MultiheadAttention-norm-CustomMSDeformableAttention-norm-前馈网络-norm
             decoder=dict(
                 type="DetectionTransformerDecoder",
                 num_layers=6,
                 return_intermediate=True,
                 transformerlayers=dict(
                     type="DetrTransformerDecoderLayer",
+                    # 注意力配置
                     attn_cfgs=[
+                        # 多头注意力，8个头
                         dict(
                             type="MultiheadAttention",
                             embed_dims=_dim_,
                             num_heads=8,
                             dropout=0.1,
                         ),
+                        # 可变形注意力
                         dict(
                             type="CustomMSDeformableAttention",
                             embed_dims=_dim_,
@@ -212,6 +258,8 @@ model = dict(
                     ],
                     feedforward_channels=_ffn_dim_,
                     ffn_dropout=0.1,
+                    ##########* 操作顺序##########
+                    # 自注意力-norm-交叉注意力-norm-前馈网络-norm
                     operation_order=(
                         "self_attn",
                         "norm",
@@ -223,6 +271,7 @@ model = dict(
                 ),
             ),
         ),
+        # 边界框编码器
         bbox_coder=dict(
             type="NMSFreeCoder",
             post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
@@ -231,34 +280,41 @@ model = dict(
             voxel_size=voxel_size,
             num_classes=10,
         ),
+        #* 可学习的位置编码
         positional_encoding=dict(
             type="LearnedPositionalEncoding",
             num_feats=_pos_dim_,
             row_num_embed=bev_h_,
             col_num_embed=bev_w_,
         ),
+        # 分类损失，边界框损失，IoU损失
+        # IoU：交并比损失用于评估两个边界框之间的重叠程度
         loss_cls=dict(
             type="FocalLoss", use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0
         ),
         loss_bbox=dict(type="L1Loss", loss_weight=0.25),
         loss_iou=dict(type="GIoULoss", loss_weight=0.0),
     ),
+
+    #* 地图感知模块：MapFormer
     seg_head=dict(
         type='PansegformerHead',
         bev_h=bev_h_,
         bev_w=bev_w_,
         canvas_size=canvas_size,
         pc_range=point_cloud_range,
-        num_query=300,
-        num_classes=4,
-        num_things_classes=3,
-        num_stuff_classes=1,
-        in_channels=2048,
+        num_query=300,              # 查询数量
+        num_classes=4,              # 总类别数
+        num_things_classes=3,       # 物体类别数
+        num_stuff_classes=1,        # 非物体类别数
+        in_channels=2048,           # 输入通道数
         sync_cls_avg_factor=True,
-        as_two_stage=False,
-        with_box_refine=True,
+        as_two_stage=False,         #* 不进行两阶段检测
+        with_box_refine=True,       # 使用边界框细化
+        # 用于全景分割的可变形transformer
         transformer=dict(
             type='SegDeformableTransformer',
+            # encoder: 6层，每一层：多尺度可变形注意力-norm-前馈网络-norm
             encoder=dict(
                 type='DetrTransformerEncoder',
                 num_layers=6,
@@ -272,18 +328,22 @@ model = dict(
                     feedforward_channels=_feed_dim_,
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'ffn', 'norm'))),
+            # decoder: 6层：多头自注意力-norm-多尺度可变形注意力-norm-前馈网络-norm
             decoder=dict(
                 type='DeformableDetrTransformerDecoder',
                 num_layers=6,
                 return_intermediate=True,
                 transformerlayers=dict(
                     type='DetrTransformerDecoderLayer',
+                    # 注意力配置
                     attn_cfgs=[
+                        # 多头自注意力，8个头
                         dict(
                             type='MultiheadAttention',
                             embed_dims=_dim_,
                             num_heads=8,
                             dropout=0.1),
+                        # 多尺度可变形注意力
                         dict(
                             type='MultiScaleDeformableAttention',
                             embed_dims=_dim_,
@@ -297,11 +357,13 @@ model = dict(
                 ),
             ),
         ),
+        # 位置编码
         positional_encoding=dict(
             type='SinePositionalEncoding',
             num_feats=_dim_half_,
             normalize=True,
             offset=-0.5),
+        # 分类损失，边界框损失，IoU损失，掩模损失
         loss_cls=dict(
             type='FocalLoss',
             use_sigmoid=True,
@@ -311,6 +373,7 @@ model = dict(
         loss_bbox=dict(type='L1Loss', loss_weight=5.0),
         loss_iou=dict(type='GIoULoss', loss_weight=2.0),
         loss_mask=dict(type='DiceLoss', loss_weight=2.0),
+        # thing和stuff的transformer头
         thing_transformer_head=dict(type='SegMaskHead',d_model=_dim_,nhead=8,num_decoder_layers=4),
         stuff_transformer_head=dict(type='SegMaskHead',d_model=_dim_,nhead=8,num_decoder_layers=6,self_attn=True),
         train_cfg=dict(
@@ -327,10 +390,14 @@ model = dict(
                 iou_cost=dict(type='IoUCost', iou_mode='giou', weight=2.0),
                 mask_cost=dict(type='DiceCost', weight=2.0),
                 ),
+            # 采样器: 伪采样：仅保留接口不进行采样，直接使用所有样本
             sampler =dict(type='PseudoSampler'),
             sampler_with_mask =dict(type='PseudoSampler_segformer'),
         ),
     ),
+    #*####################################################
+
+    #* OccFormer
     occ_head=dict(
         type='OccHead',
 
@@ -699,6 +766,8 @@ log_config = dict(
     interval=10, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")]
 )
 checkpoint_config = dict(interval=1)
-load_from = "ckpts/uniad_base_track_map.pth"
+# load_from = "ckpts/uniad_base_track_map.pth"
+# 接着训练
+load_from = "experiments/2024_10_26_UniAD_origin/stage1_track_map/base_track_map/latest.pth"
 
 find_unused_parameters = True

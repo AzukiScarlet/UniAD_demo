@@ -121,7 +121,6 @@ def main():
     #* 一下进行命令行参数和配置文件的整合
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
-    
     # *从字符串列表中导入模块
     if cfg.get('custom_imports', None):
         from mmcv.utils import import_modules_from_strings

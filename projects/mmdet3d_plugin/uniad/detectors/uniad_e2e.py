@@ -20,20 +20,22 @@ class UniAD(UniADTrack):
     """
     def __init__(
         self,
-        seg_head=None,
-        motion_head=None,
-        occ_head=None,
-        planning_head=None,
-        task_loss_weight=dict(
+        seg_head=None,                # 语义分割的头: Mapformer              
+        motion_head=None,             # Motionformer的头
+        occ_head=None,                # Occ的头
+        planning_head=None,           # Planning的头
+        task_loss_weight=dict(  # 一般用默认
             track=1.0,
             map=1.0,
             motion=1.0,
             occ=1.0,
             planning=1.0
         ),
-        **kwargs,
+        **kwargs,                    
     ):
-        super(UniAD, self).__init__(**kwargs)
+        super(UniAD, self).__init__(**kwargs)      # 初始化cfg中的参数
+
+        # cfg中若有，初始化各个任务的头
         if seg_head:
             self.seg_head = build_head(seg_head)
         if occ_head:
@@ -43,40 +45,41 @@ class UniAD(UniADTrack):
         if planning_head:
             self.planning_head = build_head(planning_head)
         
+        # 初始化各个任务的权重, 确保有track, map, motion, occ, planning
         self.task_loss_weight = task_loss_weight
         assert set(task_loss_weight.keys()) == \
-               {'track', 'occ', 'motion', 'map', 'planning'}
+            {'track', 'occ', 'motion', 'map', 'planning'}
 
+    # 检查是否有各个任务的头, @property装饰器，只读属性
     @property
     def with_planning_head(self):
         return hasattr(self, 'planning_head') and self.planning_head is not None
-    
     @property
     def with_occ_head(self):
         return hasattr(self, 'occ_head') and self.occ_head is not None
-
     @property
     def with_motion_head(self):
         return hasattr(self, 'motion_head') and self.motion_head is not None
-
     @property
     def with_seg_head(self):
         return hasattr(self, 'seg_head') and self.seg_head is not None
 
     def forward_dummy(self, img):
+        """
+        在训练前，测试前向传播
+        """
         dummy_metas = None
         return self.forward_test(img=img, img_metas=[[dummy_metas]])
 
     def forward(self, return_loss=True, **kwargs):
-        """Calls either forward_train or forward_test depending on whether
-        return_loss=True.
-        Note this setting will change the expected inputs. When
-        `return_loss=True`, img and img_metas are single-nested (i.e.
-        torch.Tensor and list[dict]), and when `resturn_loss=False`, img and
-        img_metas should be double nested (i.e.  list[torch.Tensor],
-        list[list[dict]]), with the outer list indicating test time
-        augmentations.
         """
+        根据 return_loss=True 的设置，将调用 forward_train 或 forward_test。
+        
+        此设置将改变预期的输入。当 return_loss=True 时，即train阶段，img 和 img_metas 是单层嵌套的（即 torch.Tensor 和 list[dict]）；
+        
+        而当 return_loss=False 时，即测试阶段，img 和 img_metas 应该是双层嵌套的（即 list[torch.Tensor] 和 list[list[dict]]），外层列表表示测试时的增强。
+        """
+        # 训练是需要返回loss，测试不需要
         if return_loss:
             return self.forward_train(**kwargs)
         else:
@@ -84,7 +87,7 @@ class UniAD(UniADTrack):
         
 
     # Add the subtask loss to the whole model loss
-    @auto_fp16(apply_to=('img', 'points'))
+    @auto_fp16(apply_to=('img', 'points')) # 装饰器，自动将输入转换为fp16，提高训练效率，减少显存占用。
     def forward_train(self,
                       img=None,
                       img_metas=None,
@@ -105,7 +108,7 @@ class UniAD(UniADTrack):
                       gt_sdc_label=None,
                       gt_sdc_fut_traj=None,
                       gt_sdc_fut_traj_mask=None,
-                      
+
                       # Occ_gt
                       gt_segmentation=None,
                       gt_instance=None, 
@@ -120,70 +123,88 @@ class UniAD(UniADTrack):
                       gt_future_boxes=None,
                       **kwargs,  # [1, 9]
                       ):
-        """Forward training function for the model that includes multiple tasks, such as tracking, segmentation, motion prediction, occupancy prediction, and planning.
+        """
+        训练过程前向传播，such as tracking, segmentation, motion prediction, occupancy prediction, and planning.
+        输入为(N, C, H, W)的图像张量，返回损失字典。
 
             Args:
-            img (torch.Tensor, optional): Tensor containing images of each sample with shape (N, C, H, W). Defaults to None.
-            img_metas (list[dict], optional): List of dictionaries containing meta information for each sample. Defaults to None.
-            gt_bboxes_3d (list[:obj:BaseInstance3DBoxes], optional): List of ground truth 3D bounding boxes for each sample. Defaults to None.
-            gt_labels_3d (list[torch.Tensor], optional): List of tensors containing ground truth labels for 3D bounding boxes. Defaults to None.
-            gt_inds (list[torch.Tensor], optional): List of tensors containing indices of ground truth objects. Defaults to None.
-            l2g_t (list[torch.Tensor], optional): List of tensors containing translation vectors from local to global coordinates. Defaults to None.
-            l2g_r_mat (list[torch.Tensor], optional): List of tensors containing rotation matrices from local to global coordinates. Defaults to None.
-            timestamp (list[float], optional): List of timestamps for each sample. Defaults to None.
-            gt_bboxes_ignore (list[torch.Tensor], optional): List of tensors containing ground truth 2D bounding boxes in images to be ignored. Defaults to None.
-            gt_lane_labels (list[torch.Tensor], optional): List of tensors containing ground truth lane labels. Defaults to None.
-            gt_lane_bboxes (list[torch.Tensor], optional): List of tensors containing ground truth lane bounding boxes. Defaults to None.
-            gt_lane_masks (list[torch.Tensor], optional): List of tensors containing ground truth lane masks. Defaults to None.
-            gt_fut_traj (list[torch.Tensor], optional): List of tensors containing ground truth future trajectories. Defaults to None.
-            gt_fut_traj_mask (list[torch.Tensor], optional): List of tensors containing ground truth future trajectory masks. Defaults to None.
-            gt_past_traj (list[torch.Tensor], optional): List of tensors containing ground truth past trajectories. Defaults to None.
-            gt_past_traj_mask (list[torch.Tensor], optional): List of tensors containing ground truth past trajectory masks. Defaults to None.
-            gt_sdc_bbox (list[torch.Tensor], optional): List of tensors containing ground truth self-driving car bounding boxes. Defaults to None.
-            gt_sdc_label (list[torch.Tensor], optional): List of tensors containing ground truth self-driving car labels. Defaults to None.
-            gt_sdc_fut_traj (list[torch.Tensor], optional): List of tensors containing ground truth self-driving car future trajectories. Defaults to None.
-            gt_sdc_fut_traj_mask (list[torch.Tensor], optional): List of tensors containing ground truth self-driving car future trajectory masks. Defaults to None.
-            gt_segmentation (list[torch.Tensor], optional): List of tensors containing ground truth segmentation masks. Defaults to
-            gt_instance (list[torch.Tensor], optional): List of tensors containing ground truth instance segmentation masks. Defaults to None.
-            gt_occ_img_is_valid (list[torch.Tensor], optional): List of tensors containing binary flags indicating whether an image is valid for occupancy prediction. Defaults to None.
-            sdc_planning (list[torch.Tensor], optional): List of tensors containing self-driving car planning information. Defaults to None.
-            sdc_planning_mask (list[torch.Tensor], optional): List of tensors containing self-driving car planning masks. Defaults to None.
-            command (list[torch.Tensor], optional): List of tensors containing high-level command information for planning. Defaults to None.
-            gt_future_boxes (list[torch.Tensor], optional): List of tensors containing ground truth future bounding boxes for planning. Defaults to None.
-            gt_future_labels (list[torch.Tensor], optional): List of tensors containing ground truth future labels for planning. Defaults to None.
+                img (torch.Tensor, optional): Tensor containing images of each sample with shape (N, C, H, W). Defaults to None.
+                img_metas (list[dict], optional): List of dictionaries containing meta information for each sample. Defaults to None.
+                gt_bboxes_3d (list[:obj:BaseInstance3DBoxes], optional): List of ground truth 3D bounding boxes for each sample. Defaults to None.
+                gt_labels_3d (list[torch.Tensor], optional): List of tensors containing ground truth labels for 3D bounding boxes. Defaults to None.
+                gt_inds (list[torch.Tensor], optional): List of tensors containing indices of ground truth objects. Defaults to None.
+                l2g_t (list[torch.Tensor], optional): List of tensors containing translation vectors from local to global coordinates. Defaults to None.
+                l2g_r_mat (list[torch.Tensor], optional): List of tensors containing rotation matrices from local to global coordinates. Defaults to None.
+                timestamp (list[float], optional): List of timestamps for each sample. Defaults to None.
+                gt_bboxes_ignore (list[torch.Tensor], optional): List of tensors containing ground truth 2D bounding boxes in images to be ignored. Defaults to None.
+                gt_lane_labels (list[torch.Tensor], optional): List of tensors containing ground truth lane labels. Defaults to None.
+                gt_lane_bboxes (list[torch.Tensor], optional): List of tensors containing ground truth lane bounding boxes. Defaults to None.
+                gt_lane_masks (list[torch.Tensor], optional): List of tensors containing ground truth lane masks. Defaults to None.
+                gt_fut_traj (list[torch.Tensor], optional): List of tensors containing ground truth future trajectories. Defaults to None.
+                gt_fut_traj_mask (list[torch.Tensor], optional): List of tensors containing ground truth future trajectory masks. Defaults to None.
+                gt_past_traj (list[torch.Tensor], optional): List of tensors containing ground truth past trajectories. Defaults to None.
+                gt_past_traj_mask (list[torch.Tensor], optional): List of tensors containing ground truth past trajectory masks. Defaults to None.
+                gt_sdc_bbox (list[torch.Tensor], optional): List of tensors containing ground truth self-driving car bounding boxes. Defaults to None.
+                gt_sdc_label (list[torch.Tensor], optional): List of tensors containing ground truth self-driving car labels. Defaults to None.
+                gt_sdc_fut_traj (list[torch.Tensor], optional): List of tensors containing ground truth self-driving car future trajectories. Defaults to None.
+                gt_sdc_fut_traj_mask (list[torch.Tensor], optional): List of tensors containing ground truth self-driving car future trajectory masks. Defaults to None.
+                gt_segmentation (list[torch.Tensor], optional): List of tensors containing ground truth segmentation masks. Defaults to
+                gt_instance (list[torch.Tensor], optional): List of tensors containing ground truth instance segmentation masks. Defaults to None.
+                gt_occ_img_is_valid (list[torch.Tensor], optional): List of tensors containing binary flags indicating whether an image is valid for occupancy prediction. Defaults to None.
+                sdc_planning (list[torch.Tensor], optional): List of tensors containing self-driving car planning information. Defaults to None.
+                sdc_planning_mask (list[torch.Tensor], optional): List of tensors containing self-driving car planning masks. Defaults to None.
+                command (list[torch.Tensor], optional): List of tensors containing high-level command information for planning. Defaults to None.
+                gt_future_boxes (list[torch.Tensor], optional): List of tensors containing ground truth future bounding boxes for planning. Defaults to None.
+                gt_future_labels (list[torch.Tensor], optional): List of tensors containing ground truth future labels for planning. Defaults to None.
             
             Returns:
                 dict: Dictionary containing losses of different tasks, such as tracking, segmentation, motion prediction, occupancy prediction, and planning. Each key in the dictionary 
                     is prefixed with the corresponding task name, e.g., 'track', 'map', 'motion', 'occ', and 'planning'. The values are the calculated losses for each task.
         """
-        losses = dict()
-        len_queue = img.size(1)
-        
 
+        # loss初始化
+        losses = dict()
+        len_queue = img.size(1) # 输入图像队列长度
+        #* 感知部分###################################################
+
+        #* track_former的前向传播，返回losses和outs_track
+        # outs_track是一个字典，["bev_embed", "bev_pos",
+        #            "track_query_embeddings", "track_query_matched_idxes", "track_bbox_results",
+        #            "sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results", "sdc_embedding"]
+        # 这里还要处理图片，还要BEV等等，因此写了一个专门的函数`forward_track_train`
+        #* 本质是一整个Transformer的前向传播
+        #* encoder输出BEV特征
+        #* decoder输出Trackformer的Query
         losses_track, outs_track = self.forward_track_train(img, gt_bboxes_3d, gt_labels_3d, gt_past_traj, gt_past_traj_mask, gt_inds, gt_sdc_bbox, gt_sdc_label,
                                                         l2g_t, l2g_r_mat, img_metas, timestamp)
-        losses_track = self.loss_weighted_and_prefixed(losses_track, prefix='track')
+        losses_track = self.loss_weighted_and_prefixed(losses_track, prefix='track') # 加权loss
         losses.update(losses_track)
         
-        # Upsample bev for tiny version
+        # 如果是tiny模型，需要上采样bev
         outs_track = self.upsample_bev_if_tiny(outs_track)
-
+        # 从输出中获取BEV嵌入和位置
         bev_embed = outs_track["bev_embed"]
         bev_pos  = outs_track["bev_pos"]
 
         img_metas = [each[len_queue-1] for each in img_metas]
 
+
+        #* map_former的前向传播，返回losses和outs_seg
+        #* outs_seg是一个字典，包含了(outputs_classes, outputs_coords, enc_outputs_class, enc_outputs_coord, args_tuple, reference)
+        #* 其中args_tuple是一个元组，包含了(memory, memory_mask, memory_pos, **query**, _, query_pos, hw_lvl)
         outs_seg = dict()
         if self.with_seg_head:          
             losses_seg, outs_seg = self.seg_head.forward_train(bev_embed, img_metas,
                                                           gt_lane_labels, gt_lane_bboxes, gt_lane_masks)
             
-            losses_seg = self.loss_weighted_and_prefixed(losses_seg, prefix='map')
+            losses_seg = self.loss_weighted_and_prefixed(losses_seg, prefix='map')  # 加权loss
             losses.update(losses_seg)
 
+        #* 预测部分######################################################################
         outs_motion = dict()
         # Forward Motion Head
         if self.with_motion_head:
+            #* 输入BEV特征，track的输出：Q_a, Map的输出：Q_m
             ret_dict_motion = self.motion_head.forward_train(bev_embed,
                                                         gt_bboxes_3d, gt_labels_3d, 
                                                         gt_fut_traj, gt_fut_traj_mask, 

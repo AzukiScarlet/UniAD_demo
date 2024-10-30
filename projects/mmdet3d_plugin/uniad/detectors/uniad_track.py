@@ -176,6 +176,11 @@ class UniADTrack(MVXTwoStageDetector):
         return img_feats_reshaped
 
     def _generate_empty_tracks(self):
+        """
+        生成一个空的track实例
+        Returns:
+            Instances: 一个空的track实例
+        """
         track_instances = Instances((1, 1))
         num_queries, dim = self.query_embedding.weight.shape  # (300, 256 * 2)
         device = self.query_embedding.weight.device
@@ -373,20 +378,22 @@ class UniADTrack(MVXTwoStageDetector):
         all_instances_pred_boxes=None,
     ):
         """
-        Perform forward only on one frame. Called in  forward_train
-        Warnning: Only Support BS=1
+        处理一帧的forward， 在forward_track_train中调用
+        !Warnning: 只支持batch_size=1
         Args:
             img: shape [B, num_cam, 3, H, W]
-            if l2g_r2 is None or l2g_t2 is None:
-                it means this frame is the end of the training clip,
-                so no need to call velocity update
+            if l2g_r2 is None or l2g_t2 is None: 这帧为训练的结束，不需要速度更新
         """
         # NOTE: You can replace BEVFormer with other BEV encoder and provide bev_embed here
+        #* 生成BEV的嵌入和位置编码 本质是调用pts_bbox_head的encoder
+        #* QKV为img过embeding
         bev_embed, bev_pos = self.get_bevs(
             img, img_metas,
             prev_img=prev_img, prev_img_metas=prev_img_metas,
         )
-
+        #* 执行pts_bbox_head
+        #* 传入BEV和Track查询，参考点和图像元数据，获取检测结果
+        #* 本质为decoder
         det_output = self.pts_bbox_head.get_detections(
             bev_embed,
             object_query_embeds=track_instances.query,
@@ -394,12 +401,14 @@ class UniADTrack(MVXTwoStageDetector):
             img_metas=img_metas,
         )
 
-        output_classes = det_output["all_cls_scores"]
-        output_coords = det_output["all_bbox_preds"]
-        output_past_trajs = det_output["all_past_traj_preds"]
-        last_ref_pts = det_output["last_ref_points"]
-        query_feats = det_output["query_feats"]
-
+        # 提取检测结果
+        output_classes = det_output["all_cls_scores"]              # 分类结果
+        output_coords = det_output["all_bbox_preds"]               # 预测的边界框
+        output_past_trajs = det_output["all_past_traj_preds"]      # 预测的过去轨迹
+        last_ref_pts = det_output["last_ref_points"]               # 最后的参考点
+        query_feats = det_output["query_feats"]                    # Q
+        
+        #* 输出封装，只取最后一帧的结果做预测 + BEV的嵌入和位置编码
         out = {
             "pred_logits": output_classes[-1],
             "pred_boxes": output_coords[-1],
@@ -409,18 +418,21 @@ class UniADTrack(MVXTwoStageDetector):
             "bev_pos": bev_pos
         }
         with torch.no_grad():
-            track_scores = output_classes[-1, 0, :].sigmoid().max(dim=-1).values
+            track_scores = output_classes[-1, 0, :].sigmoid().max(dim=-1).values  # 计算分类得分，此处不需要梯度
 
-        # Step-1 Update track instances with current prediction
+        #* Step-1 由最新的预测来更新track
         # [nb_dec, bs, num_query, xxx]
-        nb_dec = output_classes.size(0)
+        nb_dec = output_classes.size(0)  #* 解码器层数
 
-        # the track id will be assigned by the matcher.
+        # 创建跟踪实例列表
         track_instances_list = [
             self._copy_tracks_for_loss(track_instances) for i in range(nb_dec - 1)
         ]
+        # 将最后一层的Q给输出嵌入
         track_instances.output_embedding = query_feats[-1][0]  # [300, feat_dim]
+        # 最后一层的速度信息
         velo = output_coords[-1, 0, :, -2:]  # [num_query, 3]
+        # 更新参考点
         if l2g_r2 is not None:
             # Update ref_pts for next frame considering each agent's velocity
             ref_pts = self.velo_update(
@@ -435,43 +447,53 @@ class UniADTrack(MVXTwoStageDetector):
         else:
             ref_pts = last_ref_pts[0]
 
-        dim = track_instances.query.shape[-1]
+        dim = track_instances.query.shape[-1]    # Q的维度
+        # 更新参考点
         track_instances.ref_pts = self.reference_points(track_instances.query[..., :dim//2])
         track_instances.ref_pts[...,:2] = ref_pts[...,:2]
-
+        # 更新track实例
         track_instances_list.append(track_instances)
         
+        #* 处理每个decoder层的输出
         for i in range(nb_dec):
             track_instances = track_instances_list[i]
 
+            # 更新track得分，分类，边界框，历史
             track_instances.scores = track_scores
             track_instances.pred_logits = output_classes[i, 0]  # [300, num_cls]
             track_instances.pred_boxes = output_coords[i, 0]  # [300, box_dim]
             track_instances.pred_past_trajs = output_past_trajs[i, 0]  # [300,past_steps, 2]
+            
+            out["track_instances"] = track_instances  # 添加到输出中
 
-            out["track_instances"] = track_instances
+            # 计算匹配索引
             track_instances, matched_indices = self.criterion.match_for_single_frame(
                 out, i, if_step=(i == (nb_dec - 1))
             )
+
+            # 记录每个decoder层的Q嵌入，匹配索引，预测的实例logits和bbox
             all_query_embeddings.append(query_feats[i][0])
             all_matched_indices.append(matched_indices)
             all_instances_pred_logits.append(output_classes[i, 0])
             all_instances_pred_boxes.append(output_coords[i, 0])   # Not used
         
+        #* 选择活跃的track查询和自车查询更新out
         active_index = (track_instances.obj_idxes>=0) & (track_instances.iou >= self.gt_iou_threshold) & (track_instances.matched_gt_idxes >=0)
         out.update(self.select_active_track_query(track_instances, active_index, img_metas))
-        out.update(self.select_sdc_track_query(track_instances[900], img_metas))
+        out.update(self.select_sdc_track_query(track_instances[900], img_metas))  #* tack_instances[900]是自车的查询
         
-        # memory bank 
+        # 使用内存库更新track实例 
         if self.memory_bank is not None:
             track_instances = self.memory_bank(track_instances)
-        # Step-2 Update track instances using matcher
+        
+        #* Step-2 使用匹配器更新track实例
 
         tmp = {}
         tmp["init_track_instances"] = self._generate_empty_tracks()
         tmp["track_instances"] = track_instances
-        out_track_instances = self.query_interact(tmp)
+        out_track_instances = self.query_interact(tmp)  #* 将track实例传入交互模块，更新track实例
         out["track_instances"] = out_track_instances
+        
         return out
 
     def select_active_track_query(self, track_instances, active_index, img_metas, with_mask=True):
@@ -504,15 +526,20 @@ class UniADTrack(MVXTwoStageDetector):
                             l2g_r_mat,
                             img_metas,
                             timestamp):
-        """Forward funciton
-        Args:
+        """Track的训练前向传播网络,输入：img图片[N, C, H, W]，img_metas元数据
+
         Returns:
+            losses(dict): 损失字典
+            out(dict): 输出字典:bev嵌入，bev的位置，track的query_emb，匹配的idx，track的bbox结果，自车的3d bbox，自车的3d分数，自车的track分数，自车的track bbox结果，自车的嵌入
         """
+        #* 初始化track，生成一个空的track实例，内涵
         track_instances = self._generate_empty_tracks()
-        num_frame = img.size(1)
+        num_frame = img.size(1)    # 输入图像的帧数
         # init gt instances!
+        # 初始化gt instances，用于存储每帧的gt信息
         gt_instances_list = []
 
+        #遍历每一帧图像，经过处理后，将gt信息存储到gt_instances_list中
         for i in range(num_frame):
             gt_instances = Instances((1, 1))
             boxes = gt_bboxes_3d[0][i].tensor.to(img.device)
@@ -529,25 +556,32 @@ class UniADTrack(MVXTwoStageDetector):
             gt_instances.sdc_labels = torch.cat([gt_sdc_label[0][i] for _ in range(gt_labels_3d[0][i].shape[0])], dim=0)
             gt_instances_list.append(gt_instances)
 
+        # 初始化损失计算器
         self.criterion.initialize_for_single_clip(gt_instances_list)
 
         out = dict()
 
         for i in range(num_frame):
+            # 获取历史帧的图像
             prev_img = img[:, :i, ...] if i != 0 else img[:, :1, ...]
             prev_img_metas = copy.deepcopy(img_metas)
             # TODO: Generate prev_bev in an RNN way.
 
-            img_single = torch.stack([img_[i] for img_ in img], dim=0)
+            # 将当前帧的图像堆叠成一个张量 
+            # img: [N, B, num_cam, 3, H, W]
+            # img_single: [B, num_cam, 3, H, W]
+            img_single = torch.stack([img_[i] for img_ in img], dim=0) # 形状没变，这步有什么用？
             img_metas_single = [copy.deepcopy(img_metas[0][i])]
+            # 最后一帧，l2g_r2和l2g_t2为None
             if i == num_frame - 1:
-                l2g_r2 = None
+                l2g_r2 = None     
                 l2g_t2 = None
                 time_delta = None
             else:
-                l2g_r2 = l2g_r_mat[0][i + 1]
-                l2g_t2 = l2g_t[0][i + 1]
-                time_delta = timestamp[0][i + 1] - timestamp[0][i]
+                l2g_r2 = l2g_r_mat[0][i + 1]    # 世界坐标系到lidar坐标系的旋转矩阵
+                l2g_t2 = l2g_t[0][i + 1]        # 世界坐标系到lidar坐标系的平移矩阵
+                time_delta = timestamp[0][i + 1] - timestamp[0][i]  # 时间差
+            # 初始化空列表，储存每一帧的Q嵌入，匹配的索引，预测的实例logits和bbox
             all_query_embeddings = []
             all_matched_idxes = []
             all_instances_pred_logits = []
@@ -568,10 +602,12 @@ class UniADTrack(MVXTwoStageDetector):
                 all_instances_pred_logits,
                 all_instances_pred_boxes,
             )
+            #* track的查询嵌入，匹配的索引
             # all_query_embeddings: len=dec nums, N*256
             # all_matched_idxes: len=dec nums, N*2
             track_instances = frame_res["track_instances"]
         
+        # 获取输出out
         get_keys = ["bev_embed", "bev_pos",
                     "track_query_embeddings", "track_query_matched_idxes", "track_bbox_results",
                     "sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results", "sdc_embedding"]

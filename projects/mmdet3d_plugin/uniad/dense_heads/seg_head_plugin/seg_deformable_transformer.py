@@ -279,11 +279,14 @@ class SegDeformableTransformer(Transformer):
                     otherwise None.
         """
 
+        #* encoder
         assert self.as_two_stage or query_embed is not None
-        feat_flatten = []
-        mask_flatten = []
-        lvl_pos_embed_flatten = []
-        spatial_shapes = []
+        
+        #* 计算每一层的特征图的形状, 并将特征图展平
+        feat_flatten = []          # 特征图展平
+        mask_flatten = []          # mask展平
+        lvl_pos_embed_flatten = [] # 位置编码展平
+        spatial_shapes = []        # 特征图的形状
         for lvl, (feat, mask, pos_embed) in enumerate(
                 zip(mlvl_feats, mlvl_masks, mlvl_pos_embeds)):
             bs, c, h, w = feat.shape
@@ -304,6 +307,7 @@ class SegDeformableTransformer(Transformer):
                                          device=feat_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros(
             (1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        # 计算每一层的有效比例以及参考点
         valid_ratios = torch.stack(
             [self.get_valid_ratio(m) for m in mlvl_masks], 1)
 
@@ -315,6 +319,8 @@ class SegDeformableTransformer(Transformer):
         feat_flatten = feat_flatten.permute(1, 0, 2)  # (H*W, bs, embed_dims)
         lvl_pos_embed_flatten = lvl_pos_embed_flatten.permute(
             1, 0, 2)  # (H*W, bs, embed_dims)
+        
+        #* 编码器的Q, K, V均为BEV平后的特征图(K, V = None-> K, V = Q)
         memory = self.encoder(query=feat_flatten,
                               key=None,
                               value=None,
@@ -328,6 +334,9 @@ class SegDeformableTransformer(Transformer):
 
         memory = memory.permute(1, 0, 2)
         bs, _, c = memory.shape
+        #* 第二阶段训练(qurry_embeds = None), 则生成编码器输出的提案，并计算分类和回归结果。
+        #* 但是默认base_track_map.py和base_e2e.py中的配置都是as_two_stage=False
+        #* 这里没作用
         if self.as_two_stage:
             output_memory, output_proposals = \
                 self.gen_encoder_output_proposals(
@@ -350,6 +359,9 @@ class SegDeformableTransformer(Transformer):
             pos_trans_out = self.pos_trans_norm(
                 self.pos_trans(self.get_proposal_pos_embed(topk_coords_unact)))
             query_pos, query = torch.split(pos_trans_out, c, dim=2)
+        #* 第一阶段训练, 则直接使用query_embed作为query
+        #* 但是默认base_track_map.py和base_e2e.py中的配置都是as_two_stage=False
+        #* 用这个
         else:
             #print('query_embd',query_embed.shape, c)
             # query_embed N *(2C)
@@ -359,10 +371,16 @@ class SegDeformableTransformer(Transformer):
             reference_points = self.reference_points(query_pos).sigmoid()
             init_reference_out = reference_points
 
-        # decoder
+        #* decoder
+        #* Q: 第一阶段: Q用可学习的query_embeds, 第二阶段: Q用encoder的输出Q
+        #* K: decoder中不需要key输入，因为Attenion Weight是由Q经过Linear和Softmax直接求得
+        #* V: 过encoder输出的feature maps Q
         query = query.permute(1, 0, 2)
         memory = memory.permute(1, 0, 2)
         query_pos = query_pos.permute(1, 0, 2)
+        #* decoder的输出为
+        #* inter_states: 每一层decoder的Q
+        #* inter_references: 经过offest得到的参考点
         inter_states, inter_references = self.decoder(
             query=query,
             key=None,
@@ -376,9 +394,11 @@ class SegDeformableTransformer(Transformer):
             reg_branches=reg_branches,
             **kwargs)
         inter_references_out = inter_references
+        #* 第二阶段返回decoder,enocder输出,分类和回归结果
         if self.as_two_stage:
             return (memory,lvl_pos_embed_flatten,mask_flatten,query_pos), inter_states, init_reference_out,\
                 inter_references_out, enc_outputs_class,\
                 enc_outputs_coord_unact
+        #* 第一阶段仅仅返回decoder,enocder输出
         return (memory,lvl_pos_embed_flatten,mask_flatten,query_pos), inter_states, init_reference_out, \
             inter_references_out, None, None

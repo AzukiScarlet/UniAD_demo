@@ -159,6 +159,7 @@ class PerceptionTransformer(BaseModule):
                     prev_bev[:, i] = tmp_prev_bev[:, 0]
 
         # add can bus signals
+        #* 在这里融合了canbus信息
         can_bus = bev_queries.new_tensor(
             [each["can_bus"] for each in img_metas]
         )  # [:, :]
@@ -189,10 +190,11 @@ class PerceptionTransformer(BaseModule):
             0, 2, 1, 3
         )  # (num_cam, H*W, bs, embed_dims)
 
+        #* encoder
         bev_embed = self.encoder(
-            bev_queries,
-            feat_flatten,
-            feat_flatten,
+            bev_queries,            # Q: BEV的Query,初始化
+            feat_flatten,           # V: img经过处理
+            feat_flatten,           # K: img经过处理
             bev_h=bev_h,
             bev_w=bev_w,
             bev_pos=bev_pos,
@@ -227,6 +229,10 @@ class PerceptionTransformer(BaseModule):
         init_reference_out = reference_points
         query = query.permute(1, 0, 2)
         query_pos = query_pos.permute(1, 0, 2)
+        #* decoder
+        #* Q: Trackformer初始化的一个Query
+        #* K: None
+        #* V: BEV特征
         inter_states, inter_references = self.decoder(
             query=query,
             key=None,
