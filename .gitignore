@@ -152,3 +152,8 @@ debug/
 core.*
 
 test.py
+
+# 训练相关
+*.log.json
+*.pth
+logs/
