@@ -157,3 +157,6 @@ test.py
 *.log.json
 *.pth
 logs/
+
+# vscode配置
+.vscode/
