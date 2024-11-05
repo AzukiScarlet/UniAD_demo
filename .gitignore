@@ -157,6 +157,7 @@ test.py
 *.log.json
 *.pth
 logs/
+.pkl
 
 # vscode配置
 .vscode/
