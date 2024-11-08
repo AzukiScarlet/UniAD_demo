@@ -1021,7 +1021,10 @@ class PansegformerHead(SegDETRHead):
                     rescale=False):
         bbox_list = [dict() for i in range(len(img_metas))]
 
+        #* foward guo
         pred_seg_dict = self(pts_feats)
+
+        #* 从输出中获取bbox
         results = self.get_bboxes(pred_seg_dict['outputs_classes'],
                                            pred_seg_dict['outputs_coords'],
                                            pred_seg_dict['enc_outputs_class'],
@@ -1030,7 +1033,7 @@ class PansegformerHead(SegDETRHead):
                                            pred_seg_dict['reference'],
                                            img_metas,
                                            rescale=rescale)
-
+        #* 提取lane预测结果,计算车道线的iou
         with torch.no_grad():
             drivable_pred = results[0]['drivable']
             drivable_gt = gt_lane_masks[0][0, -1]
@@ -1064,10 +1067,13 @@ class PansegformerHead(SegDETRHead):
                        'divider_iou': divider_iou,
                        'crossing_iou': crossing_iou,
                        'contour_iou': contour_iou}
+        #* 将结果保存到bbox_list中
         for result_dict, pts_bbox in zip(bbox_list, results):
             result_dict['pts_bbox'] = pts_bbox
             result_dict['ret_iou'] = ret_iou
             result_dict['args_tuple'] = pred_seg_dict['args_tuple']
+        
+        #* 返回bbox_list: [{'pts_bbox': {'bbox': bbox, 'scores': scores, 'labels': labels}, 'ret_iou': ret_iou, 'args_tuple': args_tuple}]
         return bbox_list
 
 

@@ -89,42 +89,55 @@ class MotionTransformerDecoder(BaseModule):
         Returns:
             None
         """
+        #* 中间状态和参考轨迹
         intermediate = []
         intermediate_reference_trajs = []
 
+        # 扩展track_query和track_query_pos的维度，使其与agent_level_embedding的维度相同
         B, _, P, D = agent_level_embedding.shape
         track_query_bc = track_query.unsqueeze(2).expand(-1, -1, P, -1)  # (B, A, P, D)
         track_query_pos_bc = track_query_pos.unsqueeze(2).expand(-1, -1, P, -1)  # (B, A, P, D)
 
         # static intention embedding, which is imutable throughout all layers
+        #* 静态意图嵌入： 将agent过MLP后与scene和learnable嵌入相加得到所有层通用的嵌入
         agent_level_embedding = self.intention_interaction_layers(agent_level_embedding)
         static_intention_embed = agent_level_embedding + scene_level_offset_embedding + learnable_embed
+        # 参考轨迹
         reference_trajs_input = reference_trajs.unsqueeze(4).detach()
-
+        #* 初始化一个Q_ctx
         query_embed = torch.zeros_like(static_intention_embed)
+        
+        # 遍历每一层
         for lid in range(self.num_layers):
             # fuse static and dynamic intention embedding
             # the dynamic intention embedding is the output of the previous layer, which is initialized with anchor embedding
+            #* 动态嵌入：上一层的输出，使用 anchor_embedding 过MLP进行初始化
+            #* Q_pos = MLP(PE(I^s)) + MLP(PE(I^a)) + MLP(PE(x_0)) + MLP(PE(X^{l - 1}))
             dynamic_query_embed = self.dynamic_embed_fuser(torch.cat(
                 [agent_level_embedding, scene_level_offset_embedding, scene_level_ego_embedding], dim=-1))
-            
-            # fuse static and dynamic intention embedding
+            #* 融合静态和动态嵌入作为查询意图嵌入：静态意图和动态意过MLP -> Q_pos
             query_embed_intention = self.static_dynamic_fuser(torch.cat(
                 [static_intention_embed, dynamic_query_embed], dim=-1))  # (B, A, P, D)
             
-            # fuse intention embedding with query embedding
+            #* 意图嵌入和查询嵌入融合： Q_pos和Q_ctx过MLP : 每一层的真正输入
             query_embed = self.in_query_fuser(torch.cat([query_embed, query_embed_intention], dim=-1))
             
-            # interaction between agents
+            #* 上面通过Q_pos 和 Q_ctx 过 MLP 得到了本层的输入Q
+
+            #* Q_ctx和Q_A交互 -> Q_a
+            # Q_a = MHCA(MHSA(Q_ctx), Q_A)
             track_query_embed = self.track_agent_interaction_layers[lid](
                 query_embed, track_query, query_pos=track_query_pos_bc, key_pos=track_query_pos)
             
-            # interaction between agents and map
+            #* Q_ctx和Q_M交互 -> Q_m
+            # Q_m = MHCA(MHSA(Q_ctx), Q_M)
             map_query_embed = self.map_interaction_layers[lid](
                 query_embed, lane_query, query_pos=track_query_pos_bc, key_pos=lane_query_pos)
             
             # interaction between agents and bev, ie. interaction between agents and goals
             # implemented with deformable transformer
+            #* Q和BEV和目标点交互 -> Q_g
+            # 可变形注意力Q_g = DeformAttn(Q_ctx, x^{l-1}, B)
             bev_query_embed = self.bev_interaction_layers[lid](
                 query_embed,
                 value=bev_embed,
@@ -133,13 +146,14 @@ class MotionTransformerDecoder(BaseModule):
                 reference_trajs=reference_trajs_input,
                 **kwargs)
             
-            # fusing the embeddings from different interaction layers
+            # 融合Q_a, Q_m, Q_pos, 扩展后的原始Q_ctx -> Q_ctx
+            # Q_ctx = MLP([Q_a, Q_m, Q_g, Q_A])
             query_embed = [track_query_embed, map_query_embed, bev_query_embed, track_query_bc+track_query_pos_bc]
             query_embed = torch.cat(query_embed, dim=-1)
             query_embed = self.out_query_fuser(query_embed)
 
             if traj_reg_branches is not None:
-                # update reference trajectory
+                # 更新参考轨迹：用Q_ctx生成
                 tmp = traj_reg_branches[lid](query_embed)
                 bs, n_agent, n_modes, n_steps, _ = reference_trajs.shape
                 tmp = tmp.view(bs, n_agent, n_modes, n_steps, -1)
@@ -153,22 +167,28 @@ class MotionTransformerDecoder(BaseModule):
 
                 # update embedding, which is used in the next layer
                 # only update the embedding of the last step, i.e. the goal
+                # *4个MLP (场景级锚点，agent级锚点，agent真实坐标， 预测目标) -> Q_pos
+                # Q_pos = MLP(PE(I^s)) + MLP(PE(I^a)) + MLP(PE(x_0)) + MLP(PE(X^{l - 1}))
                 ep_offset_embed = reference_trajs.detach()
                 ep_ego_embed = trajectory_coordinate_transform(reference_trajs.unsqueeze(
                     2), track_bbox_results, with_translation_transform=True, with_rotation_transform=False).squeeze(2).detach()
                 ep_agent_embed = trajectory_coordinate_transform(reference_trajs.unsqueeze(
                     2), track_bbox_results, with_translation_transform=False, with_rotation_transform=True).squeeze(2).detach()
 
+                #* MLP(PE(I^a))和
                 agent_level_embedding = agent_level_embedding_layer(pos2posemb2d(
-                    norm_points(ep_agent_embed[..., -1, :], self.pc_range)))
+                    norm_points(ep_agent_embed[..., -1, :], self.pc_range))) 
+                #* MLP(PE(x_0))和MLP(PE(X^{l - 1}))
                 scene_level_ego_embedding = scene_level_ego_embedding_layer(pos2posemb2d(
                     norm_points(ep_ego_embed[..., -1, :], self.pc_range)))
+                #* MLP(PE(I^s))
                 scene_level_offset_embedding = scene_level_offset_embedding_layer(pos2posemb2d(
                     norm_points(ep_offset_embed[..., -1, :], self.pc_range)))
 
                 intermediate.append(query_embed)
                 intermediate_reference_trajs.append(reference_trajs)
 
+        #* 输出每一层的Q和参考轨迹
         return torch.stack(intermediate), torch.stack(intermediate_reference_trajs)
 
 

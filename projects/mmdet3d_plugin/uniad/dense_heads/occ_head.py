@@ -171,6 +171,19 @@ class OccHead(BaseModule):
                 nn.init.xavier_normal_(p)
 
     def get_attn_mask(self, state, ins_query):
+        """
+        G^t通过MLP生成掩码cur_ins_emb_for_mask_attn
+        通过爱因斯坦求和约定：cur_ins_emb_for_mask_attn @ F^t 得到attn_mask的分数
+        attn_mask的分数过激活函数+和阈值比较得到二值的attn_mask：O^t_m
+        对attn_mask进行插值上采样得到mask_pred
+
+        Args:
+            state (_type_): F^t
+            ins_query (_type_): G^t
+
+        Returns:
+            注意力掩码O^t_m, 插值上采样的掩码mask_pred, 用于掩码注意力的时间嵌入
+        """
         # state: b, c, h, w
         # ins_query: b, q, c
         ins_embed = self.temporal_mlp_for_mask(
@@ -196,44 +209,72 @@ class OccHead(BaseModule):
         return attn_mask, upsampled_mask_pred, ins_embed
 
     def forward(self, x, ins_query):
-        base_state = rearrange(x, '(h w) b d -> b d h w', h=self.bev_size[0])
+        """
+        x: BEV
+        ins_query: G^t = MLP_t(Q_A, Q_A_pos, pool(Q_ctx)
 
+        在其中
+        F: state
+        G: ins_query
+        base_state: F^0; base_ins_query: G^0
+        last_state: F^t-1; last_ins_query: G^t-1
+        cur_state: F^t; cur_ins_query: G^t
+        """
+        base_state = rearrange(x, '(h w) b d -> b d h w', h=self.bev_size[0])
+        #* state: F^t
+        #* F^0初始化：BEV采样->投影->下采样 base_state: [b, d, h/4, w/4] -> F^0
         base_state = self.bev_sampler(base_state)
         base_state = self.bev_light_proj(base_state)
         base_state = self.base_downscale(base_state)
+        #* ins_query: G^t
+        #* 初始化G^0
         base_ins_query = ins_query
-
-        last_state = base_state
-        last_ins_query = base_ins_query
-        future_states = []
-        mask_preds = []
-        temporal_query = []
-        temporal_embed_for_mask_attn = []
+        # 记录F^t-1和G^t-1
+        last_state = base_state           #* F^t-1
+        last_ins_query = base_ins_query   #* G^t-1
+        #* 存储未来状态F^t、预测掩码M^t(O^t_m上采样)、时间查询G^t和用于掩码注意力的时间嵌入O^t: 预测n_future_blocks步
+        future_states = []                #* {F^t}
+        mask_preds = []                   #* {M^t}        
+        temporal_query = []               #* {G^t}
+        temporal_embed_for_mask_attn = [] #* {O^t_m}
         n_trans_layer_each_block = self.num_trans_layers // self.n_future_blocks
         assert n_trans_layer_each_block >= 1
-        
+
+        #* 逐步预测未来状态
         for i in range(self.n_future_blocks):
-            # Downscale
+            #* F^t: 对F^t-1进行下采样
             cur_state = self.downscale_convs[i](last_state)  # /4 -> /8
 
             # Attention
-            # temporal_aware ins_query
+            #* G^t: G^t-1通过MLP
             cur_ins_query = self.temporal_mlps[i](last_ins_query)  # [b, q, d]
             temporal_query.append(cur_ins_query)
 
-            # Generate attn mask 
+            #* 获取O^t_m
+            #* 最终有两个掩码: 
+            #* attn_mask:用于注意力计算的掩码O^t_m
+            #* mask_pred:attn_mask的插值上采样, 用于最终预测结果的掩码
+            #* 还有一个输出: cur_ins_emb_for_mask_attn, G^t过MLP得到
+            # G^t通过MLP生成掩码cur_ins_emb_for_mask_attn
+            # 通过爱因斯坦求和约定：cur_ins_emb_for_mask_attn @ F^t 得到attn_mask的分数
+            # attn_mask的分数过激活函数+和阈值比较得到二值的attn_mask：O^t_m
+            # 对attn_mask进行插值上采样得到mask_pred: M^t
             attn_mask, mask_pred, cur_ins_emb_for_mask_attn = self.get_attn_mask(cur_state, cur_ins_query)
             attn_masks = [None, attn_mask] 
 
             mask_preds.append(mask_pred)  # /1
             temporal_embed_for_mask_attn.append(cur_ins_emb_for_mask_attn)
 
+            # 
             cur_state = rearrange(cur_state, 'b c h w -> (h w) b c')
             cur_ins_query = rearrange(cur_ins_query, 'b q c -> q b c')
-
+            
+            # 过n层transformer 只取decoder
             for j in range(n_trans_layer_each_block):
                 trans_layer_ind = i * n_trans_layer_each_block + j
                 trans_layer = self.transformer_decoder.layers[trans_layer_ind]
+                #* decoder
+                #* D^t(F^t) = MHCA(MHSA(F^t), G^t, attn_mask = O^t_m)
                 cur_state = trans_layer(
                     query=cur_state,  # [h'*w', b, c]
                     key=cur_ins_query,  # [nq, b, c]
@@ -248,24 +289,31 @@ class OccHead(BaseModule):
             cur_state = rearrange(cur_state, '(h w) b c -> b c h w', h=self.bev_size[0]//8)
             
             # Upscale to /4
-            cur_state = self.upsample_adds[i](cur_state, last_state)
+            #* transformer输出D^t(F^t)通过上采样和残差连接得到F^t
+            cur_state = self.upsample_adds[i](cur_state, last_state) # /8 -> /4
 
             # Out
+            #* 在未来状态中存储F^t，并将F^t作为下一步的F^t-1
             future_states.append(cur_state)  # [b, d, h/4, w/4]
             last_state = cur_state
 
+        #* 整合{F^t}, {G^t}, {M^t}, {O^t_m}
         future_states = torch.stack(future_states, dim=1)  # [b, t, d, h/4, w/4]
         temporal_query = torch.stack(temporal_query, dim=1)  # [b, t, q, d]
         mask_preds = torch.stack(mask_preds, dim=2)  # [b, q, t, h, w]
         ins_query = torch.stack(temporal_embed_for_mask_attn, dim=1)  # [b, t, q, d]
 
-        # Decode future states to larger resolution
-        future_states = self.dense_decoder(future_states)
+        #* 将F^t通过卷积decoder上采样得到像素级的F_dec^t
+        future_states = self.dense_decoder(future_states)  # /4 -> /1
+
+        #* U^t = MLP(M^t)
         ins_occ_query = self.query_to_occ_feat(ins_query)    # [b, t, q, query_out_dim]
         
-        # Generate final outputs
+        #* 得到最终的像素级Occ占用
+        # O^t_A = U^t @ F_dec^t
         ins_occ_logits = torch.einsum("btqc,btchw->bqthw", ins_occ_query, future_states)
         
+        #* 输出像素级Occ(O^t_A)和预测掩码
         return mask_preds, ins_occ_logits
 
     def merge_queries(self, outs_dict, detach_query_pos=True):
@@ -292,42 +340,51 @@ class OccHead(BaseModule):
                     gt_instance=None,
                     gt_img_is_valid=None,
                 ):
-        # Generate warpped gt and related inputs
+        # 生成地面实况标签和相关输入: 地面实况分割, 地面实况实例, 地面实况图像有效性
         gt_segmentation, gt_instance, gt_img_is_valid = self.get_occ_labels(gt_segmentation, gt_instance, gt_img_is_valid)
-        
+        #* 从motionformer输出中提取所有匹配的地面实况 ID
         all_matched_gt_ids = outs_dict['all_matched_idxes']  # list of tensor, length bs
-
+        
+        #* 将motion的Q_ctx 和 Q_A 过MLP生成G^0##########################
+        # G^0 = MLP_t(Q_A, Q_A_pos, pool(Q_ctx)
         ins_query = self.merge_queries(outs_dict, self.detach_query_pos)
 
-        # Forward the occ-flow model
+        #* Occ前向传播
+        #* 输入： BEV，Q_ctx和Q过MLP的到的G^0
+        #* 输出： 像素级预测掩码(注意力掩码插值上采样)，像素级Occ(O^t_A)
         mask_preds_batch, ins_seg_preds_batch = self(bev_feat, ins_query=ins_query)
         
         # Get pred and gt
+        #* 获取预测和gt，计算loss#############################
         ins_seg_targets_batch  = gt_instance # [1, 5, 200, 200] [b, t, h, w] # ins targets of a batch
-        
         # img_valid flag, for filtering out invalid samples in sequence when calculating loss
+        #* 计算loss时过滤掉无效的样本
         img_is_valid = gt_img_is_valid  # [1, 7]
         assert img_is_valid.size(1) == self.receptive_field + self.n_future,  \
                 f"Img_is_valid can only be 7 as for loss calculation and evaluation!!! Don't change it"
-        frame_valid_mask = img_is_valid.bool()
+        frame_valid_mask = img_is_valid.bool()      # 所有帧数的有效性掩码
+        # 过去和未来的有效性掩码
         past_valid_mask  = frame_valid_mask[:, :self.receptive_field]
         future_frame_mask = frame_valid_mask[:, (self.receptive_field-1):]  # [1, 5]  including current frame
 
         # only supervise when all 3 past frames are valid
+        # 检查过去的3帧是否都有效
         past_valid = past_valid_mask.all(dim=1)
         future_frame_mask[~past_valid] = False
         
-        # Calculate loss in the batch
+        # 计算batch中的loss，初始化为dict
         loss_dict = dict()
-        loss_dice = ins_seg_preds_batch.new_zeros(1)[0].float()
+        loss_dice = ins_seg_preds_batch.new_zeros(1)[0].float()       
         loss_mask = ins_seg_preds_batch.new_zeros(1)[0].float()
         loss_aux_dice = ins_seg_preds_batch.new_zeros(1)[0].float()
         loss_aux_mask = ins_seg_preds_batch.new_zeros(1)[0].float()
 
+        # 遍历batch中的每个样本
         bs = ins_query.size(0)
         assert bs == 1
         for ind in range(bs):
             # Each gt_bboxes contains 3 frames, we only use the last one
+            # 获取地面实况索引
             cur_gt_inds   = gt_inds_list[ind][-1]
 
             cur_matched_gt = all_matched_gt_ids[ind]  # [n_gt]
@@ -339,14 +396,17 @@ class OccHead(BaseModule):
             cur_gt_inds[cur_matched_gt == -1] = -1  # Bugfixed
             cur_gt_inds[cur_matched_gt == -2] = -2  
 
+            # 未来帧掩码
             frame_mask = future_frame_mask[ind]  # [t]
 
             # Prediction
+            # 获取预测和目标
             ins_seg_preds = ins_seg_preds_batch[ind]   # [q(n_gt for matched), t, h, w]
             ins_seg_targets = ins_seg_targets_batch[ind]  # [t, h, w]
             mask_preds = mask_preds_batch[ind]
             
             # Assigned-gt
+            # 分配地面实况目标
             ins_seg_targets_ordered = []
             for ins_id in cur_gt_inds:
                 # -1 for unmatched query
@@ -364,10 +424,11 @@ class OccHead(BaseModule):
                     ins_tgt = (ins_seg_targets == ins_id).long()  # [t, h, w], 0 or 1
                 
                 ins_seg_targets_ordered.append(ins_tgt)
-            
+            # 分配后的地面实况目标叠起来
             ins_seg_targets_ordered = torch.stack(ins_seg_targets_ordered, dim=0)  # [n_gt, t, h, w]
             
             # Sanity check
+            # 检查预测和目标的size是否一致
             t, h, w = ins_seg_preds.shape[-3:]
             assert t == 1+self.n_future, f"{ins_seg_preds.size()}"
             assert ins_seg_preds.size() == ins_seg_targets_ordered.size(),   \
@@ -376,19 +437,22 @@ class OccHead(BaseModule):
             num_total_pos = ins_seg_preds.size(0)  # Check this line 
 
             # loss for a sample in batch
+            #* 计算损失
             num_total_pos = ins_seg_preds.new_tensor([num_total_pos])
             num_total_pos = torch.clamp(reduce_mean(num_total_pos), min=1).item()
             
+            #* 分割的损失(实例级)
             cur_dice_loss = self.loss_dice(
                 ins_seg_preds, ins_seg_targets_ordered, avg_factor=num_total_pos, frame_mask=frame_mask)
-
+            #* 实例级掩码的损失(实例级)
             cur_mask_loss = self.loss_mask(
                 ins_seg_preds, ins_seg_targets_ordered, frame_mask=frame_mask
             )
-
+            #* 辅助分割的损失(attn级) 
             cur_aux_dice_loss = self.loss_dice(
                 mask_preds, ins_seg_targets_ordered, avg_factor=num_total_pos, frame_mask=frame_mask
             )
+            #* 辅助掩码的损失(attn级)
             cur_aux_mask_loss = self.loss_mask(
                 mask_preds, ins_seg_targets_ordered, frame_mask=frame_mask
             )
@@ -398,11 +462,13 @@ class OccHead(BaseModule):
             loss_aux_dice += cur_aux_dice_loss * self.aux_loss_weight
             loss_aux_mask += cur_aux_mask_loss * self.aux_loss_weight
 
+        # batch的损失归一化
         loss_dict['loss_dice'] = loss_dice / bs
         loss_dict['loss_mask'] = loss_mask / bs
         loss_dict['loss_aux_dice'] = loss_aux_dice / bs
         loss_dict['loss_aux_mask'] = loss_aux_mask / bs
 
+        #* 训练阶段只返回loss: Occ只参与数值优化，不参与planner的网络
         return loss_dict
 
     def forward_test(
@@ -414,42 +480,60 @@ class OccHead(BaseModule):
                     gt_instance=None,
                     gt_img_is_valid=None,
                 ):
+        #* 从地面实况中提取未来n步的Occ标签
         gt_segmentation, gt_instance, gt_img_is_valid = self.get_occ_labels(gt_segmentation, gt_instance, gt_img_is_valid)
 
+        # 提取未来n步的地面实况
         out_dict = dict()
         out_dict['seg_gt']  = gt_segmentation[:, :1+self.n_future]  # [1, 5, 1, 200, 200]
         out_dict['ins_seg_gt'] = self.get_ins_seg_gt(gt_instance[:, :1+self.n_future])  # [1, 5, 200, 200]
+        #* Q_A为空：返回全零结果： 相当于没有Occ预测
         if no_query:
             # output all zero results
             out_dict['seg_out'] = torch.zeros_like(out_dict['seg_gt']).long()  # [1, 5, 1, 200, 200]
             out_dict['ins_seg_out'] = torch.zeros_like(out_dict['ins_seg_gt']).long()  # [1, 5, 200, 200]
             return out_dict
 
+        #* 将motion的Q_ctx 和 Q_A 过MLP生成G^0##########################
+        # G^0 = MLP_t(Q_A, Q_A_pos, pool(Q_ctx)
         ins_query = self.merge_queries(outs_dict, self.detach_query_pos)
-
+        
+        #* Occ前向传播
+        #* 输入： BEV，Q_ctx和Q过MLP的到的G^0
+        #* 输出： 像素级预测掩码(注意力掩码插值上采样)，像素级Occ(O^t_A)
+        #  测试时不需要掩码，只需要Occ
         _, pred_ins_logits = self(bev_feat, ins_query=ins_query)
 
-        out_dict['pred_ins_logits'] = pred_ins_logits
+        out_dict['pred_ins_logits'] = pred_ins_logits       # 输出装填
 
+        #* 取未来n步的Occ，过激活函数转化为概率
         pred_ins_logits = pred_ins_logits[:,:,:1+self.n_future]  # [b, q, t, h, w]
         pred_ins_sigmoid = pred_ins_logits.sigmoid()  # [b, q, t, h, w]
-
+        
+        #* 测试时是否使用track score，默认为True
+        #? 用track score对Occ进行加权: track_scores * Occ：track_scores为1或0, 只关注track置信度高的Occ
         if self.test_with_track_score:
             track_scores = outs_dict['track_scores'].to(pred_ins_sigmoid)  # [b, q]
             track_scores = track_scores[:, :, None, None, None]
             pred_ins_sigmoid = pred_ins_sigmoid * track_scores  # [b, q, t, h, w]
 
-        out_dict['pred_ins_sigmoid'] = pred_ins_sigmoid
+        out_dict['pred_ins_sigmoid'] = pred_ins_sigmoid    # 输出装填
+        
+        # 取出Occ预测的概率的最大值作为分数
         pred_seg_scores = pred_ins_sigmoid.max(1)[0]
+        #* 阈值化得到Occ分割，大于阈值为1，小于阈值为0
         seg_out = (pred_seg_scores > self.test_seg_thresh).long().unsqueeze(2)  # [b, t, 1, h, w]
         out_dict['seg_out'] = seg_out
+        # 评估时是否进行实例分割，默认为True
         if self.pan_eval:
             # ins_pred
             pred_consistent_instance_seg =  \
                 predict_instance_segmentation_and_trajectories(seg_out, pred_ins_sigmoid)  # bg is 0, fg starts with 1, consecutive
             
             out_dict['ins_seg_out'] = pred_consistent_instance_seg  # [1, 5, 200, 200]
-
+        
+        #* 输出：'seg_gt', 'ins_seg_gt': 地面实况分割和实例分割；'pred_ins_logits': Occ原始输出
+        #* 'pred_ins_sigmoid': Occ预测的概率；'seg_out', 'ins_seg_out': 预测的Occ分割和实例分割
         return out_dict
 
     def get_ins_seg_gt(self, gt_instance):

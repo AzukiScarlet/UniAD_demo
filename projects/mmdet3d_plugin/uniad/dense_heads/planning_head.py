@@ -115,24 +115,35 @@ class PlanningHeadSingleMode(nn.Module):
         Returns:
             ret_dict (dict): A dictionary containing the losses and planning outputs.
         """
+        #* 提取自车的轨迹跟踪和预测： Q_sdc_ctx, Q_sdc_A
         sdc_traj_query = outs_motion['sdc_traj_query']
         sdc_track_query = outs_motion['sdc_track_query']
         bev_pos = outs_motion['bev_pos']
 
         occ_mask = None
         
+        #* forward
+        #* 输入：BEV, Occ(二值化), BEV位置编码, 自车轨迹跟踪和预测，导航指令
+        # * 输出：规划的自车轨迹
         outs_planning = self(bev_embed, occ_mask, bev_pos, sdc_traj_query, sdc_track_query, command)
+        
+        #* 计算loss
         loss_inputs = [sdc_planning, sdc_planning_mask, outs_planning, gt_future_boxes]
         losses = self.loss(*loss_inputs)
         ret_dict = dict(losses=losses, outs_motion=outs_planning)
         return ret_dict
 
     def forward_test(self, bev_embed, outs_motion={}, outs_occflow={}, command=None):
+        #* 提取自车的轨迹跟踪和预测： Q_sdc_ctx, Q_sdc_A
+        #* 提取BEV和Occ(二值化)
         sdc_traj_query = outs_motion['sdc_traj_query']
         sdc_track_query = outs_motion['sdc_track_query']
         bev_pos = outs_motion['bev_pos']
         occ_mask = outs_occflow['seg_out']
         
+        #* forward
+        #* 输入：BEV, Occ(二值化), BEV位置编码, 自车轨迹跟踪和预测，导航指令
+        #* 输出：规划的自车轨迹
         outs_planning = self(bev_embed, occ_mask, bev_pos, sdc_traj_query, sdc_track_query, command)
         return outs_planning
 
@@ -162,14 +173,16 @@ class PlanningHeadSingleMode(nn.Module):
         P = sdc_traj_query.shape[1]
         sdc_track_query = sdc_track_query[:, None].expand(-1,P,-1)
         
-        
+        #* 将command embedding生成导航查询Q_navi
         navi_embed = self.navi_embed.weight[command]
         navi_embed = navi_embed[None].expand(-1,P,-1)
+        #* 将自车轨迹跟踪和预测，以及导航查询进行过MLP作为规划查询Q_plan
         plan_query = torch.cat([sdc_traj_query, sdc_track_query, navi_embed], dim=-1)
 
         plan_query = self.mlp_fuser(plan_query).max(1, keepdim=True)[0]   # expand, then fuse  # [1, 6, 768] -> [1, 1, 256]
         plan_query = rearrange(plan_query, 'b p c -> p b c')
         
+        #* 提取BEV(+位置编码)
         bev_pos = rearrange(bev_pos, 'b c h w -> (h w) b c')
         bev_feat = bev_embed +  bev_pos
         
@@ -187,14 +200,15 @@ class PlanningHeadSingleMode(nn.Module):
         # bev_feat: [40000, 1, 256]
         plan_query = self.attn_module(plan_query, bev_feat)   # [1, 1, 256]
         
+        #* Q_plan经过多层MLP后，输出规划的自车轨迹
         sdc_traj_all = self.reg_branch(plan_query).view((-1, self.planning_steps, 2))
-        sdc_traj_all[...,:2] = torch.cumsum(sdc_traj_all[...,:2], dim=1)
-        sdc_traj_all[0] = bivariate_gaussian_activation(sdc_traj_all[0])
+        sdc_traj_all[...,:2] = torch.cumsum(sdc_traj_all[...,:2], dim=1)   # 累积和
+        sdc_traj_all[0] = bivariate_gaussian_activation(sdc_traj_all[0])   # 双变量高斯激活函数平滑？
         if self.use_col_optim and not self.training:
             # post process, only used when testing
             assert occ_mask is not None
             sdc_traj_all = self.collision_optimization(sdc_traj_all, occ_mask)
-        
+        #* 返回规划的自车轨迹
         return dict(
             sdc_traj=sdc_traj_all,
             sdc_traj_all=sdc_traj_all,

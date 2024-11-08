@@ -755,6 +755,7 @@ class UniADTrack(MVXTwoStageDetector):
         # img_metas = img_metas[0]
 
         """ init track instances for first frame """
+        # 切换场景时，重新初始化track实例
         if (
             self.test_track_instances is None
             or img_metas[0]["scene_token"] != self.scene_token
@@ -764,7 +765,7 @@ class UniADTrack(MVXTwoStageDetector):
             self.prev_bev = None
             track_instances = self._generate_empty_tracks()
             time_delta, l2g_r1, l2g_t1, l2g_r2, l2g_t2 = None, None, None, None, None
-            
+        # 同一场景，更新track实例
         else:
             track_instances = self.test_track_instances
             time_delta = timestamp - self.timestamp
@@ -781,6 +782,7 @@ class UniADTrack(MVXTwoStageDetector):
 
         """ predict and update """
         prev_bev = self.prev_bev
+        #* BEV和track_former一帧的前向传播
         frame_res = self._forward_single_frame_inference(
             img,
             img_metas,
@@ -793,18 +795,22 @@ class UniADTrack(MVXTwoStageDetector):
             time_delta,
         )
 
+        #* 提取出BEV和Q_A
         self.prev_bev = frame_res["bev_embed"]
         track_instances = frame_res["track_instances"]
         track_instances_fordet = frame_res["track_instances_fordet"]
 
         self.test_track_instances = track_instances
         results = [dict()]
+        #* 从track_instances中提取出需要的信息
+        #* BEV相关，Q_A相关， bbox，分数，标签，自车相关的Q_A和得分标签
         get_keys = ["bev_embed", "bev_pos", 
                     "track_query_embeddings", "track_bbox_results", 
                     "boxes_3d", "scores_3d", "labels_3d", "track_scores", "track_ids"]
         if self.with_motion_head:
             get_keys += ["sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results", "sdc_embedding"]
         results[0].update({k: frame_res[k] for k in get_keys})
+        #* 将实例转换为结果
         results = self._det_instances2results(track_instances_fordet, results, img_metas)
         return results
     

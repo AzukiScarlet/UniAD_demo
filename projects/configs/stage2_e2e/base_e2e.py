@@ -395,24 +395,25 @@ model = dict(
             sampler_with_mask =dict(type='PseudoSampler_segformer'),
         ),
     ),
+
     #*####################################################
 
     #* OccFormer
     occ_head=dict(
         type='OccHead',
+        grid_conf=occflow_grid_conf,    # Occ网格参数
+        ignore_index=255,               # 忽略索引
+        bev_proj_dim=256,               # BEV投影维度
+        bev_proj_nlayers=4,             # BEV投影层数
 
-        grid_conf=occflow_grid_conf,
-        ignore_index=255,
-
-        bev_proj_dim=256,
-        bev_proj_nlayers=4,
-
-        # Transformer
+        #* Transformer，只使用decoder
         attn_mask_thresh=0.3,
+        #* decoder配置
+        #* 5层，每一层：多头自注意力-norm-多头交叉注意力-norm-前馈网络-norm
         transformer_decoder=dict(
             type='DetrTransformerDecoder',
-            return_intermediate=True,
-            num_layers=5,
+            return_intermediate=True,   # 返回中间结果
+            num_layers=5,               
             transformerlayers=dict(
                 type='DetrTransformerDecoderLayer',
                 attn_cfgs=dict(
@@ -435,10 +436,11 @@ model = dict(
                 operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                  'ffn', 'norm')),
             init_cfg=None),
-        # Query
+        #* Query 
         query_dim=256,
         query_mlp_layers=3,
-
+        
+        # loss配置
         aux_loss_weight=1.,
         loss_mask=dict(
             type='FieryBinarySegmentationLoss',
@@ -463,15 +465,18 @@ model = dict(
         test_seg_thresh=0.1,
         test_with_track_score=True,
     ),
+
+    #* MotionFormer
     motion_head=dict(
         type='MotionHead',
         bev_h=bev_h_,
         bev_w=bev_w_,
         num_query=300,
         num_classes=10,
-        predict_steps=predict_steps,
-        predict_modes=predict_modes,
+        predict_steps=predict_steps,    # 预测步数
+        predict_modes=predict_modes,    # 预测模式
         embed_dims=_dim_,
+        # 预测轨迹相关损失
         loss_traj=dict(type='TrajLoss', 
             use_variance=True, 
             cls_loss_weight=0.5, 	
@@ -481,9 +486,14 @@ model = dict(
         num_cls_fcs=3,
         pc_range=point_cloud_range,
         group_id_list=group_id_list,
-        num_anchor=6,
-        use_nonlinear_optimizer=use_nonlinear_optimizer,
-        anchor_info_path='data/others/motion_anchor_infos_mode6.pkl',
+        num_anchor=6,   # 锚点数量
+        use_nonlinear_optimizer=use_nonlinear_optimizer,   #* 使用非线性优化器
+        anchor_info_path='data/others/motion_anchor_infos_mode6.pkl',  # 锚点信息路径
+        
+        #* Transformer 注：这里只定义里Q_g的transformer DeformableAttention
+        #* 前面还有两个Q_a和Q_m = MHCA(MHSA(Q),Q_a) 在modules.py中已经定义好，起始就是传统的transformer的纯decoder部分自注意力 + 交叉注意力
+        #* self.track_agent_interaction_layers = nn.ModuleList([TrackAgentInteraction() for i in range(self.num_layers)])
+        #* self.map_interaction_layers = nn.ModuleList([MapInteraction() for i in range(self.num_layers)])
         transformerlayers=dict(
             type='MotionTransformerDecoder',
             pc_range=point_cloud_range,
@@ -508,25 +518,29 @@ model = dict(
                 operation_order=('cross_attn', 'norm', 'ffn', 'norm')),
         ),
     ),
+
+    #* Planner
     planning_head=dict(
         type='PlanningHeadSingleMode',
         embed_dims=256,
         planning_steps=planning_steps,
+        # loss配置
         loss_planning=dict(type='PlanningLoss'),
         loss_collision=[dict(type='CollisionLoss', delta=0.0, weight=2.5),
                         dict(type='CollisionLoss', delta=0.5, weight=1.0),
                         dict(type='CollisionLoss', delta=1.0, weight=0.25)],
-        use_col_optim=use_col_optim,
+        use_col_optim=use_col_optim,         #* 使用碰撞优化, 数值优化
         planning_eval=True,
-        with_adapter=True,
+        with_adapter=True,     
     ),
     # model training and testing settings
     train_cfg=dict(
+        # 点云处理参数
         pts=dict(
-            grid_size=[512, 512, 1],
+            grid_size=[512, 512, 1],                 #2D网格大小 
             voxel_size=voxel_size,
             point_cloud_range=point_cloud_range,
-            out_size_factor=4,
+            out_size_factor=4,                       # 输出尺寸因子
             assigner=dict(
                 type="HungarianAssigner3D",
                 cls_cost=dict(type="FocalLossCost", weight=2.0),
@@ -539,18 +553,26 @@ model = dict(
         )
     ),
 )
+
+#* 数据设置################################################################
 dataset_type = "NuScenesE2EDataset"
 data_root = "data/nuscenes/"
 info_root = "data/infos/"
 file_client_args = dict(backend="disk")
+
+# 训练集、验证集和测试集的注释信息
 ann_file_train=info_root + f"nuscenes_infos_temporal_train.pkl"
 ann_file_val=info_root + f"nuscenes_infos_temporal_val.pkl"
 ann_file_test=info_root + f"nuscenes_infos_temporal_val.pkl"
 
-
+#* 训练和测试数据pipeline设置，模型的数据流，架构全在这里###############################################
+#* 数据读取， 数据预处理， 创建模型， 评估模型结果，模型调仓
 train_pipeline = [
+    # 数据读取，从data_root中读取图像，转化为float32格式
     dict(type="LoadMultiViewImageFromFilesInCeph", to_float32=True, file_client_args=file_client_args, img_root=data_root),
+    # 图像增强
     dict(type="PhotoMetricDistortionMultiViewImage"),
+    # 加载3D注释
     dict(
         type="LoadAnnotations3D_E2E",
         with_bbox_3d=True,
@@ -562,14 +584,18 @@ train_pipeline = [
         ins_inds_add_1=True,    # ins_inds start from 1
     ),
 
+    # 生成OccFlow标签(只生成车辆的OccFlow标签)
     dict(type='GenerateOccFlowLabels', grid_conf=occflow_grid_conf, ignore_index=255, only_vehicle=True, 
                                     filter_invisible=False),  # NOTE: Currently vis_token is not in pkl 
-
+    # 过滤无效的样本
     dict(type="ObjectRangeFilterTrack", point_cloud_range=point_cloud_range),
     dict(type="ObjectNameFilterTrack", classes=class_names),
+    # 图像标准化，填充，故事化为3D数据输出
     dict(type="NormalizeMultiviewImage", **img_norm_cfg),
     dict(type="PadMultiViewImage", size_divisor=32),
     dict(type="DefaultFormatBundle3D", class_names=class_names),
+    
+    #* 从处理后的数据中收集指定的key，并将它们打包成一个字典
     dict(
         type="CustomCollect3D",
         keys=[
@@ -591,7 +617,7 @@ train_pipeline = [
             "gt_lane_labels",
             "gt_lane_bboxes",
             "gt_lane_masks",
-             # Occ gt
+            # Occ gt
             "gt_segmentation",
             "gt_instance", 
             "gt_centerness", 
@@ -610,11 +636,14 @@ train_pipeline = [
         ],
     ),
 ]
+# 测试数据pipeline设置
 test_pipeline = [
+    # 数据读取 + 图像标准化 + 填充 + 故事化为3D数据输出
     dict(type='LoadMultiViewImageFromFilesInCeph', to_float32=True,
             file_client_args=file_client_args, img_root=data_root),
     dict(type="NormalizeMultiviewImage", **img_norm_cfg),
     dict(type="PadMultiViewImage", size_divisor=32),
+    # 测试时不需要3D边界框和标签，只需要未来注释
     dict(type='LoadAnnotations3D_E2E', 
          with_bbox_3d=False,
          with_label_3d=False, 
@@ -624,8 +653,10 @@ test_pipeline = [
          with_ins_inds_3d=False,
          ins_inds_add_1=True, # ins_inds start from 1
          ),
+    # 生成OccFlow标签(只生成车辆的OccFlow标签)
     dict(type='GenerateOccFlowLabels', grid_conf=occflow_grid_conf, ignore_index=255, only_vehicle=True, 
                                        filter_invisible=False),
+    # 多尺度图像增强
     dict(
         type="MultiScaleFlipAug3D",
         img_scale=(1600, 900),
@@ -644,6 +675,7 @@ test_pipeline = [
                                             "gt_lane_labels",
                                             "gt_lane_bboxes",
                                             "gt_lane_masks",
+                                            # Occ gt
                                             "gt_segmentation",
                                             "gt_instance", 
                                             "gt_centerness", 
@@ -661,15 +693,17 @@ test_pipeline = [
         ],
     ),
 ]
+#* 训练数据配置
 data = dict(
-    samples_per_gpu=1,
-    workers_per_gpu=8,
+    samples_per_gpu=1,       # 每个GPU的batch_size
+    workers_per_gpu=8,       # 每个GPU分配数据加载的线程数
+    # 训练数据配置:train_pipeline
     train=dict(
         type=dataset_type,
         file_client_args=file_client_args,
         data_root=data_root,
         ann_file=ann_file_train,
-        pipeline=train_pipeline,
+        pipeline=train_pipeline,      #* train_pipeline流程
         classes=class_names,
         modality=input_modality,
         test_mode=False,
@@ -691,12 +725,14 @@ data = dict(
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
         box_type_3d="LiDAR",
     ),
+
+    # 验证数据配置:test_pipeline
     val=dict(
         type=dataset_type,
         file_client_args=file_client_args,
         data_root=data_root,
         ann_file=ann_file_val,
-        pipeline=test_pipeline,
+        pipeline=test_pipeline,         #* test_pipeline流程
         patch_size=patch_size,
         canvas_size=canvas_size,
         bev_size=(bev_h_, bev_w_),
@@ -709,11 +745,13 @@ data = dict(
         samples_per_gpu=1,
         eval_mod=['det', 'map', 'track','motion'],
         
-
+        # Occ流参数
         occ_receptive_field=3,
         occ_n_future=occ_n_future_max,
         occ_filter_invalid_sample=False,
     ),
+
+    # 测试数据配置:test_pipeline，第二阶段含有Occ和planning信息
     test=dict(
         type=dataset_type,
         file_client_args=file_client_args,
@@ -736,6 +774,8 @@ data = dict(
     shuffler_sampler=dict(type="DistributedGroupSampler"),
     nonshuffler_sampler=dict(type="DistributedSampler"),
 )
+
+# 优化器设置
 optimizer = dict(
     type="AdamW",
     lr=2e-4,
@@ -755,19 +795,29 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3,
 )
+
+#* 训练20个epoch
 total_epochs = 20
+#* 每4次迭代，进入一次评估
 evaluation = dict(
     interval=4,
     pipeline=test_pipeline,
     planning_evaluation_strategy=planning_evaluation_strategy,
 )
+#* runner设置
 runner = dict(type="EpochBasedRunner", max_epochs=total_epochs)
+
+# 记录训练日志，Tensorboard日志
 log_config = dict(
     interval=10, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")]
 )
+# 检查点设置,每训练一个epoch保存一次
 checkpoint_config = dict(interval=1)
-# load_from = "ckpts/uniad_base_track_map.pth"
-# 接着训练
-load_from = "experiments/2024_10_26_UniAD_origin/stage1_track_map/base_track_map/latest.pth"
+load_from = "ckpts/uniad_base_track_map.pth"
+# 接着训练 在.sh中还可以设置resume_from的路径
+# load_from = "experiments/2024_10_26_UniAD_origin/stage1_track_map/base_track_map/latest.pth"
+# load_from = "projects/work_dirs/stage2_e2e/base_e2e/latest.pth"
 
+
+#* 运行配置
 find_unused_parameters = True

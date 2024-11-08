@@ -111,32 +111,52 @@ class MotionHead(BaseMotionHead):
             outs_seg (dict): Outputs of seg head.
             future_states (list[torch.Tensor]): Ground truth future states of each sample.
         Returns:
-            dict: Losses of each branch.
+            dict: Losses of each branch. + outs_motion
         """
+        #* 提取Q_A
         track_query = outs_track['track_query_embeddings'][None, None, ...] # num_dec, B, A_track, D
         all_matched_idxes = [outs_track['track_query_matched_idxes']] #BxN
         track_boxes = outs_track['track_bbox_results']
         
-        # cat sdc query/gt to the last
+        #* 将自车的Q和GT融合到一起拼接到最后
+        # 创建一个自车匹配索引，用于将自车的Q和GT融合到一起
         sdc_match_index = torch.zeros((1,), dtype=all_matched_idxes[0].dtype, device=all_matched_idxes[0].device)
         sdc_match_index[0] = gt_fut_traj[0].shape[0]
         all_matched_idxes = [torch.cat([all_matched_idxes[0], sdc_match_index], dim=0)]
+        # 将自车的未来轨迹, 轨迹掩码, Q ,跟踪的边界框拼接到gt的后面
         gt_fut_traj[0] = torch.cat([gt_fut_traj[0], gt_sdc_fut_traj[0]], dim=0)
         gt_fut_traj_mask[0] = torch.cat([gt_fut_traj_mask[0], gt_sdc_fut_traj_mask[0]], dim=0)
         track_query = torch.cat([track_query, outs_track['sdc_embedding'][None, None, None, :]], dim=2)
         sdc_track_boxes = outs_track['sdc_track_bbox_results']
+        #* 将自车的跟踪边界框拼接track_boxes后面
         track_boxes[0][0].tensor = torch.cat([track_boxes[0][0].tensor, sdc_track_boxes[0][0].tensor], dim=0)
         track_boxes[0][1] = torch.cat([track_boxes[0][1], sdc_track_boxes[0][1]], dim=0)
         track_boxes[0][2] = torch.cat([track_boxes[0][2], sdc_track_boxes[0][2]], dim=0)
         track_boxes[0][3] = torch.cat([track_boxes[0][3], sdc_track_boxes[0][3]], dim=0)
         
+        #* 提取Q_M
         memory, memory_mask, memory_pos, lane_query, _, lane_query_pos, hw_lvl = outs_seg['args_tuple']
 
+        #* 前向传播获取outs_motion ############################
+        #* 输入：B，Q_A(自车的Q拼到最后)，Q_M，Q_M位置编码，跟踪边界框
+        #* 输出：(轨迹分数，轨迹预测，有效轨迹掩码，**Q_ctx**, Q_A, Q_A_pos)
         outs_motion = self(bev_embed, track_query, lane_query, lane_query_pos, track_boxes)
+        #* 计算loss 在这里用非线性优化
         loss_inputs = [gt_bboxes_3d, gt_fut_traj, gt_fut_traj_mask, outs_motion, all_matched_idxes, track_boxes]
         losses = self.loss(*loss_inputs)
 
         def filter_vehicle_query(outs_motion, all_matched_idxes, gt_labels_3d, vehicle_id_list):
+            """#?根据车辆 ID 列表创建一个掩码，并使用该掩码过滤运动输出中的轨迹查询、跟踪查询和位置查询。
+
+            Args:
+                outs_motion (_type_): track_former输出
+                all_matched_idxes (_type_): 匹配的索引
+                gt_labels_3d (_type_): 3D标签
+                vehicle_id_list (_type_): 车辆ID列表
+
+            Returns:
+                _type_: 过滤后的outs_motion
+            """
             query_label = gt_labels_3d[0][-1][all_matched_idxes[0]]
             # select vehicle query according to vehicle_id_list
             vehicle_mask = torch.zeros_like(query_label)
@@ -148,6 +168,7 @@ class MotionHead(BaseMotionHead):
             all_matched_idxes[0] = all_matched_idxes[0][vehicle_mask>0]
             return outs_motion, all_matched_idxes
 
+        #* 将自车的轨迹查询、跟踪查询和位置查询从运动输出中分离出来。
         all_matched_idxes[0] = all_matched_idxes[0][:-1]
         outs_motion['sdc_traj_query'] = outs_motion['traj_query'][:, :, -1]         # [3, 1, 6, 256]     [n_dec, b, n_mode, d]
         outs_motion['sdc_track_query'] = outs_motion['track_query'][:, -1]          # [1, 256]           [b, d]
@@ -156,27 +177,38 @@ class MotionHead(BaseMotionHead):
         outs_motion['track_query'] = outs_motion['track_query'][:, :-1]             # [1, 3, 256]        [b, nq, d]   
         outs_motion['track_query_pos'] = outs_motion['track_query_pos'][:, :-1]     # [1, 3, 256]        [b, nq, d]  
 
-        
+        # 过滤车辆查询
         outs_motion, all_matched_idxes = filter_vehicle_query(outs_motion, all_matched_idxes, gt_labels_3d, self.vehicle_id_list)
         outs_motion['all_matched_idxes'] = all_matched_idxes
 
         ret_dict = dict(losses=losses, outs_motion=outs_motion, track_boxes=track_boxes)
+        #* 最终输出 (losses, (Q_ctx, Q_ctx中自车的Q...), track_boxes)
         return ret_dict
 
     def forward_test(self, bev_embed, outs_track={}, outs_seg={}):
         """Test function"""
+
+        #* 提取Q_A和agent的bbox
         track_query = outs_track['track_query_embeddings'][None, None, ...]
         track_boxes = outs_track['track_bbox_results']
         
+        #* 将自车的Q和Q_A融合到一起拼接到最后,提取自车的bbox
         track_query = torch.cat([track_query, outs_track['sdc_embedding'][None, None, None, :]], dim=2)
         sdc_track_boxes = outs_track['sdc_track_bbox_results']
 
+        # 将自车的bbox拼接track_boxes后面
         track_boxes[0][0].tensor = torch.cat([track_boxes[0][0].tensor, sdc_track_boxes[0][0].tensor], dim=0)
         track_boxes[0][1] = torch.cat([track_boxes[0][1], sdc_track_boxes[0][1]], dim=0)
         track_boxes[0][2] = torch.cat([track_boxes[0][2], sdc_track_boxes[0][2]], dim=0)
         track_boxes[0][3] = torch.cat([track_boxes[0][3], sdc_track_boxes[0][3]], dim=0)      
+        
+        #* foward
+        #* 输入: BEV, Q_A, Q_M, Q_M位置编码, 跟踪边界框
+        #* 输出：轨迹分数，轨迹预测，有效轨迹掩码，轨迹查询Q_ctx，跟踪查询Q_A，跟踪查询位置
         memory, memory_mask, memory_pos, lane_query, _, lane_query_pos, hw_lvl = outs_seg['args_tuple']
         outs_motion = self(bev_embed, track_query, lane_query, lane_query_pos, track_boxes)
+        
+        #* 从Motion网络输出和bbox中提取轨迹
         traj_results = self.get_trajs(outs_motion, track_boxes)
         bboxes, scores, labels, bbox_index, mask = track_boxes[0]
         outs_motion['track_scores'] = scores[None, :]
@@ -197,7 +229,7 @@ class MotionHead(BaseMotionHead):
         
         outs_motion = filter_vehicle_query(outs_motion, labels, self.vehicle_id_list)
         
-        # filter sdc query
+        #* 将自车的轨迹查询、跟踪查询和位置查询从运动输出中分离出来。
         outs_motion['sdc_traj_query'] = outs_motion['traj_query'][:, :, -1]
         outs_motion['sdc_track_query'] = outs_motion['track_query'][:, -1]
         outs_motion['sdc_track_query_pos'] = outs_motion['track_query_pos'][:, -1]
@@ -206,6 +238,7 @@ class MotionHead(BaseMotionHead):
         outs_motion['track_query_pos'] = outs_motion['track_query_pos'][:, :-1]
         outs_motion['track_scores'] = outs_motion['track_scores'][:, :-1]
 
+        #* 输出Motionformer的预测轨迹, 网络输出相关(轨迹分数，轨迹预测，有效轨迹掩码，轨迹查询Q_ctx，跟踪查询Q_A，跟踪查询位置)
         return traj_results, outs_motion
 
     @auto_fp16(apply_to=('bev_embed', 'track_query', 'lane_query', 'lane_query_pos', 'lane_query_embed', 'prev_bev'))
@@ -239,31 +272,34 @@ class MotionHead(BaseMotionHead):
         device = track_query.device
         num_groups = self.kmeans_anchors.shape[0]
 
-        # extract the last frame of the track query
+        # 取出轨迹查询的最后一帧
         track_query = track_query[:, -1]
         
         # encode the center point of the track query
+        # 编码轨迹查询的中心点
         reference_points_track = self._extract_tracking_centers(
             track_bbox_results, self.pc_range)
         track_query_pos = self.boxes_query_embedding_layer(pos2posemb2d(reference_points_track.to(device)))  # B, A, D
         
-        # construct the learnable query positional embedding
-        # split and stack according to groups
+        # construct the learnable query positional embedding split and stack according to groups
+        #* 构造可学习的查询位置嵌入，根据组分割并堆叠
         learnable_query_pos = self.learnable_motion_query_embedding.weight.to(dtype)  # latent anchor (P*G, D)
         learnable_query_pos = torch.stack(torch.split(learnable_query_pos, self.num_anchor, dim=0))
 
         # construct the agent level/scene-level query positional embedding 
         # (num_groups, num_anchor, 12, 2)
         # to incorporate the information of different groups and coordinates, and embed the headding and location information
+        #* 构建agent级的(总体和自车) 以及场景级的embedding：
         agent_level_anchors = self.kmeans_anchors.to(dtype).to(device).view(num_groups, self.num_anchor, self.predict_steps, 2).detach()
         scene_level_ego_anchors = anchor_coordinate_transform(agent_level_anchors, track_bbox_results, with_translation_transform=True)  # B, A, G, P ,12 ,2
         scene_level_offset_anchors = anchor_coordinate_transform(agent_level_anchors, track_bbox_results, with_translation_transform=False)  # B, A, G, P ,12 ,2
-
+        # 归一化
         agent_level_norm = norm_points(agent_level_anchors, self.pc_range)
         scene_level_ego_norm = norm_points(scene_level_ego_anchors, self.pc_range)
         scene_level_offset_norm = norm_points(scene_level_offset_anchors, self.pc_range)
 
         # we only use the last point of the anchor
+        # 只使用锚点的最后一个点
         agent_level_embedding = self.agent_level_embedding_layer(
             pos2posemb2d(agent_level_norm[..., -1, :]))  # G, P, D
         scene_level_ego_embedding = self.scene_level_ego_embedding_layer(
@@ -278,10 +314,12 @@ class MotionHead(BaseMotionHead):
         
         # save for latter, anchors
         # B, A, G, P ,12 ,2 -> B, A, P ,12 ,2
+        # 保存锚点：根据bbox将场景级别的偏移锚点进行分组处理
         scene_level_offset_anchors = self.group_mode_query_pos(track_bbox_results, scene_level_offset_anchors)  
 
         # select class embedding
         # B, A, G, P , D-> B, A, P , D
+        # 选择类别嵌入：根据bbox对代理级别嵌入Q_A和场景级别嵌入Q_M进行分组处理。
         agent_level_embedding = self.group_mode_query_pos(
             track_bbox_results, agent_level_embedding)  
         scene_level_ego_embedding = self.group_mode_query_pos(
@@ -290,14 +328,25 @@ class MotionHead(BaseMotionHead):
         # B, A, G, P , D -> B, A, P , D
         scene_level_offset_embedding = self.group_mode_query_pos(
             track_bbox_results, scene_level_offset_embedding)  
+        #* 处理可学习嵌入:根据输入的边界框结果对可学习嵌入Q处理
         learnable_embed = self.group_mode_query_pos(
             track_bbox_results, learnable_embed)  
 
+        # 将场景级别的偏移锚点保存为初始参考点
         init_reference = scene_level_offset_anchors.detach()
 
         outputs_traj_scores = []
         outputs_trajs = []
-
+        #* motionformer
+        '''
+        Q_ctx = MLP(Q_ctx , Q_pos)
+        Q_a/m = MHCA(MHSA(Q_ctx), Q_A / Q_M)
+        Q_g = DeformAttn(Q_ctx, x^{l-1}, B)
+        Q_ctx = MLP([Q_a, Q_m, Q_g, Q_A])
+        Q_pos = MLP(PE(I^s)) + MLP(PE(I^a)) + MLP(PE(x_0)) + MLP(PE(X^{l - 1}))
+        '''
+        #* 输入：Q_A,Q_M,B; 一堆嵌入层；计算Q_pos的一堆MLP层 ，初始化一个Q_ctx
+        #* 输出：每一层的Q_ctx和由Q_ctx得到的参考轨迹(不用)
         inter_states, inter_references = self.motionformer(
             track_query,  # B, A_track, D
             lane_query,  # B, M, D
@@ -321,12 +370,15 @@ class MotionHead(BaseMotionHead):
                 [[self.bev_h, self.bev_w]], device=device),
             level_start_index=torch.tensor([0], device=device))
 
+        # 每一层的中间状态进行处理
         for lvl in range(inter_states.shape[0]):
+            # 分类输出
             outputs_class = self.traj_cls_branches[lvl](inter_states[lvl])
             tmp = self.traj_reg_branches[lvl](inter_states[lvl])
             tmp = self.unflatten_traj(tmp)
             
             # we use cumsum trick here to get the trajectory 
+            # 对输出前两个维度累加，得到轨迹
             tmp[..., :2] = torch.cumsum(tmp[..., :2], dim=3)
 
             outputs_class = self.log_softmax(outputs_class.squeeze(3))
@@ -337,9 +389,10 @@ class MotionHead(BaseMotionHead):
             outputs_trajs.append(tmp)
         outputs_traj_scores = torch.stack(outputs_traj_scores)
         outputs_trajs = torch.stack(outputs_trajs)
-
+        # (B, A_track, D): 按照track_quer > 0的位置进行mask
         B, A_track, D = track_query.shape
         valid_traj_masks = track_query.new_ones((B, A_track)) > 0
+        #* 输出：轨迹分数，轨迹预测，有效轨迹掩码，轨迹查询，跟踪查询，跟踪查询位置
         outs = {
             'all_traj_scores': outputs_traj_scores,
             'all_traj_preds': outputs_trajs,

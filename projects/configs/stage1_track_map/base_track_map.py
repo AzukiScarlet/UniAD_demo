@@ -416,7 +416,7 @@ model = dict(
             grid_size=[512, 512, 1],   #2D网格大小 
             voxel_size=voxel_size,
             point_cloud_range=point_cloud_range,
-            out_size_factor=4,      # 输出尺寸因子
+            out_size_factor=4,       
             # 匈牙利分配器
             assigner=dict(
                 type="HungarianAssigner3D",
@@ -442,7 +442,7 @@ ann_file_train=info_root + f"nuscenes_infos_temporal_train.pkl"
 ann_file_val=info_root + f"nuscenes_infos_temporal_val.pkl"
 ann_file_test=info_root + f"nuscenes_infos_temporal_val.pkl"
 
-#* 训练和测试数据管道设置，模型的数据流，架构全在这里###############################################
+#* 训练和测试数据pipeline设置，模型的数据流，架构全在这里###############################################
 #* 数据读取， 数据预处理， 创建模型， 评估模型结果，模型调仓
 train_pipeline = [
     # 数据读取，从data_root中读取图像，转化为float32格式
@@ -515,7 +515,7 @@ train_pipeline = [
         ],
     ),
 ]
-# 测试数据管道设置
+# 测试数据pipeline设置
 test_pipeline = [
     # 数据读取 + 图像标准化 + 填充 + 故事化为3D数据输出
     dict(type='LoadMultiViewImageFromFilesInCeph', to_float32=True,
