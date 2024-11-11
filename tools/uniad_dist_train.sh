@@ -15,11 +15,19 @@ NNODES=`expr $GPUS / $GPUS_PER_NODE`  # 计算节点数
 MASTER_PORT=${MASTER_PORT:-28596}
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 RANK=${RANK:-0}
+# GPU_IDS=(0 1 2)
+
 
 # 生成work_dir, logs目录
 WORK_DIR=$(echo ${CFG%.*} | sed -e "s/configs/work_dirs/g")/
 # Intermediate files and logs will be saved to UniAD/projects/work_dirs/
 
+#* 设置训练的检查点
+# 第一阶段在 UniAD/projects/work_dirs/stage1_track_map/base_track_map/latest.pth
+# 第二阶段在 UniAD/projects/work_dirs/stage2_e2e/base_e2e/latest.pth
+RESUME_FROM="${WORK_DIR}latest.pth"  # 设置恢复训练的检查点路径M
+
+echo "RESUME: ${RESUME_FROM}"
 if [ ! -d ${WORK_DIR}logs ]; then
     mkdir -p ${WORK_DIR}logs
 fi
@@ -37,4 +45,5 @@ python -m torch.distributed.launch \
     --launcher pytorch ${@:3} \
     --deterministic \
     --work-dir ${WORK_DIR} \
+    --resume-from ${RESUME_FROM} \
     2>&1 | tee ${WORK_DIR}logs/train.$T
