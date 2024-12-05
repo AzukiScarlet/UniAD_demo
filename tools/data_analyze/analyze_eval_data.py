@@ -158,6 +158,7 @@ class DataAnalyze:
                 self.occ_data = self.data['occ_results_computed']
                 self.planning_data = self.data['planning_results_computed']
                 print("pkl data loaded successfully!")
+                # 
         except FileNotFoundError:
             print(f"文件 {self.pkl_path} 未找到。")
             return None
@@ -361,30 +362,3 @@ class DataAnalyze:
 
         print("Saving pandas data to: ", output_pd_path)
         self.pd_data.to_csv(output_pd_path)
-
-    
-def main():
-    # 初始化类
-    data_analyze = DataAnalyze(
-        pkl_path="data/eval_data.pkl",
-        track_json_path="data/track/metrics_summary.json",
-        log_path="data/eval.log",
-        final_json_path="data/final.json"
-    )
-
-    # 加载数据
-    data_analyze.load_data()
-
-    # 分析数据
-    data_analyze.analyze_occ()
-    data_analyze.analyze_planning()
-    data_analyze.analyze_track()
-    data_analyze.analyze_map()
-    data_analyze.analyze_motion()
-
-    # 保存数据
-    data_analyze.save_final_data("data/final.json", "data/pd_data.csv")
-
-if __name__ == "__main__":
-    main()
-

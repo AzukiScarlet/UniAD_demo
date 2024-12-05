@@ -18,13 +18,13 @@ import numpy as np
 import pycocotools.mask as mask_util
 
 def custom_encode_mask_results(mask_results):
-    """Encode bitmap mask to RLE code. Semantic Masks only
-    Args:
-        mask_results (list | tuple[list]): bitmap mask results.
-            In mask scoring rcnn, mask_results is a tuple of (segm_results,
-            segm_cls_score).
-    Returns:
-        list | tuple: RLE encoded mask.
+    
+    """将位图掩码编码为RLE代码。仅限语义掩码
+    参数:
+        mask_results (list | tuple[list]): 位图掩码结果。
+            在mask scoring rcnn中，mask_results是(segm_results, segm_cls_score)的元组。
+    返回:
+        list | tuple: RLE编码的掩码。
     """
     cls_segms = mask_results
     num_classes = len(cls_segms)
@@ -34,8 +34,9 @@ def custom_encode_mask_results(mask_results):
             mask_util.encode(
                 np.array(
                     cls_segms[i][:, :, np.newaxis], order='F',
-                        dtype='uint8'))[0])  # encoded with RLE
+                        dtype='uint8'))[0])  # 使用RLE编码
     return [encoded_mask_results]
+    
 
 def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     """Test model with multiple gpus.

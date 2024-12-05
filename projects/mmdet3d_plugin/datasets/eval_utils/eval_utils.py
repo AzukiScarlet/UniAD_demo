@@ -426,8 +426,10 @@ def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, cat
     splits = create_splits_scenes()
 
     # Check compatibility of split with nusc_version.
+    #* 实际上验证时version = 'v1.0-trainval'， eval_split = 'val'：会报错
+    #* 在这里添加一个val
     version = nusc.version
-    if eval_split in {'train', 'val', 'train_detect', 'train_track'}:
+    if eval_split in {'train', 'train_detect', 'train_track', 'val'}:
         assert version.endswith('trainval'), \
             'Error: Requested split {} which is not compatible with NuScenes version {}'.format(eval_split, version)
     elif eval_split in {'mini_train', 'mini_val'}:

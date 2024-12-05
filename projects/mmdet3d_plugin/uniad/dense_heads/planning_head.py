@@ -126,6 +126,7 @@ class PlanningHeadSingleMode(nn.Module):
         #* 输入：BEV, Occ(二值化), BEV位置编码, 自车轨迹跟踪和预测，导航指令
         # * 输出：规划的自车轨迹
         outs_planning = self(bev_embed, occ_mask, bev_pos, sdc_traj_query, sdc_track_query, command)
+        #调用forward函数，返回规划的自车轨迹
         
         #* 计算loss
         loss_inputs = [sdc_planning, sdc_planning_mask, outs_planning, gt_future_boxes]

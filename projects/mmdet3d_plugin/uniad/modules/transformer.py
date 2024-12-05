@@ -42,10 +42,10 @@ class PerceptionTransformer(BaseModule):
         decoder=None,
         embed_dims=256,
         rotate_prev_bev=True,
-        use_shift=True,
-        use_can_bus=True,
-        can_bus_norm=True,
-        use_cams_embeds=True,
+        use_shift=True,#位移
+        use_can_bus=True,#can总线
+        can_bus_norm=True,#can总线归一化
+        use_cams_embeds=True,#使用摄像头嵌入
         rotate_center=[100, 100],
         **kwargs
     ):

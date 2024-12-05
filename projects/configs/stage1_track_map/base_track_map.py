@@ -19,7 +19,7 @@ plugin_dir = "projects/mmdet3d_plugin/"
 #* eg. grid_size = [512, 512, 1] 个 voxel_size = [0.2, 0.2, 8]
 #* 构成point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
-voxel_size = [0.2, 0.2, 8]   # 定义体素的大小(分辨率)
+voxel_size = [0.2, 0.2, 8]   # 定义体素的大小(分辨率),体素是体积元素（Volume Pixel）的简称，是数字数据在三维空间分割上的最小单位。
 patch_size = [102.4, 102.4]  # 定义图像的大小
 img_norm_cfg = dict(mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], to_rgb=False)  # 图像标准化配置 (均值， 标准差， 是否转换为RGB格式)
 #* nuscens 场景中将agent分为10类
@@ -42,11 +42,11 @@ input_modality = dict(
 )
 
 _dim_ = 256  # 基础维度
-_pos_dim_ = _dim_ // 2  # 位置维度 
+_pos_dim_ = _dim_ // 2  # 位置维度 ,//向下取整除法
 _ffn_dim_ = _dim_ * 2   # 前馈网络维度
 _num_levels_ = 4        # 多头注意力的数量
-bev_h_ = 200            
-bev_w_ = 200
+bev_h_ = 200            #鸟瞰图的高度
+bev_w_ = 200            #鸟瞰图的宽度
 _feed_dim_ = _ffn_dim_  # 前馈网络输入维度
 _dim_half_ = _pos_dim_  # 位置维度的一半
 canvas_size = (bev_h_, bev_w_)  # 鸟瞰图尺寸
@@ -73,6 +73,7 @@ use_col_optim = True       #* 使用碰撞优化(牛顿法再优化)
 # uniad: computed at a particular time (e.g., L2 distance between the predicted and ground truth future trajectory at time 3.0s)
 # stp3: computed as the average up to a particular time (e.g., average L2 distance between the predicted and ground truth future trajectory up to 3.0s)
 planning_evaluation_strategy = "uniad"  # 采用uniad的评价策略
+#规划指标存在多种解释，UniAD：在特定时间点进行计算
 
 ###* Occ 范围和步长 ### 
 occflow_grid_conf = {
@@ -82,7 +83,7 @@ occflow_grid_conf = {
 }
 
 # Other settings
-train_gt_iou_threshold=0.3    # 训练时的IoU阈值
+train_gt_iou_threshold=0.3    # 训练时的IoU阈值,似乎有点低？
 
 #* 模型设置################################################################
 model = dict(
@@ -342,7 +343,7 @@ model = dict(
             decoder=dict(
                 type='DeformableDetrTransformerDecoder',
                 num_layers=6,
-                return_intermediate=True,
+                return_intermediate=True,#返回中间层输出
                 transformerlayers=dict(
                     type='DetrTransformerDecoderLayer',
                     # 注意力配置
@@ -386,7 +387,8 @@ model = dict(
         # thing和stuff的transformer头
         thing_transformer_head=dict(type='SegMaskHead',d_model=_dim_,nhead=8,num_decoder_layers=4),
         stuff_transformer_head=dict(type='SegMaskHead',d_model=_dim_,nhead=8,num_decoder_layers=6,self_attn=True),
-        
+        #Thing：指的是具有明确边界和形状的离散对象，如人、汽车、动物等。这些对象通常可以单独计数和分割。
+        #Stuff：指的是没有明确边界的连续区域，如天空、草地、道路等。这些区域通常是背景的一部分，不能单独计数。
         train_cfg=dict(
             # 分配器: 匈牙利分配器
             assigner=dict(

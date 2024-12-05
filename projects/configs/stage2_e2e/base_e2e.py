@@ -200,6 +200,7 @@ model = dict(
                     #    attn_cfgs[0] -> self_attn, attn_cfgs[1] -> cross_attn
                     # 最终执行为 TemporalSelfAttention -> norm -> SpatialCrossAttention -> norm -> FeedForward -> norm
                     attn_cfgs=[
+                        #时间自注意力
                         dict(
                             type="TemporalSelfAttention", embed_dims=_dim_, num_levels=1
                         ),
@@ -777,7 +778,7 @@ data = dict(
 
 # 优化器设置
 optimizer = dict(
-    type="AdamW",
+    type="AdamW",#带权重衰减的Adam优化器
     lr=2e-4,
     paramwise_cfg=dict(
         custom_keys={

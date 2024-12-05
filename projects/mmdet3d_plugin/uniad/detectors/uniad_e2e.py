@@ -4,6 +4,11 @@
 # Copyright (c) OpenDriveLab. All rights reserved.                                #
 #---------------------------------------------------------------------------------#
 
+from projects.mmdet3d_plugin.uniad.dense_heads.motion_head import MotionHead
+from projects.mmdet3d_plugin.uniad.dense_heads.occ_head import OccHead
+from projects.mmdet3d_plugin.uniad.dense_heads.panseg_head import PansegformerHead
+from projects.mmdet3d_plugin.uniad.dense_heads.planning_head import PlanningHeadSingleMode
+from projects.mmdet3d_plugin.uniad.dense_heads.seg_head_plugin.seg_detr_head import SegDETRHead
 import torch
 from mmcv.runner import auto_fp16
 from mmdet.models import DETECTORS
@@ -37,13 +42,13 @@ class UniAD(UniADTrack):
 
         # cfg中若有，初始化各个任务的头
         if seg_head:
-            self.seg_head = build_head(seg_head)
+            self.seg_head: PansegformerHead = build_head(seg_head)
         if occ_head:
-            self.occ_head = build_head(occ_head)
+            self.occ_head: OccHead  = build_head(occ_head)
         if motion_head:
-            self.motion_head = build_head(motion_head)
+            self.motion_head:MotionHead = build_head(motion_head)
         if planning_head:
-            self.planning_head = build_head(planning_head)
+            self.planning_head:PlanningHeadSingleMode = build_head(planning_head)
         
         # 初始化各个任务的权重, 确保有track, map, motion, occ, planning
         self.task_loss_weight = task_loss_weight
@@ -66,7 +71,7 @@ class UniAD(UniADTrack):
 
     def forward_dummy(self, img):
         """
-        在训练前，测试前向传播
+        在训练前，确保模型的前向传播可以正常运行
         """
         dummy_metas = None
         return self.forward_test(img=img, img_metas=[[dummy_metas]])
@@ -77,7 +82,7 @@ class UniAD(UniADTrack):
         
         此设置将改变预期的输入。当 return_loss=True 时，即train阶段，img 和 img_metas 是单层嵌套的（即 torch.Tensor 和 list[dict]）；
         
-        而当 return_loss=False 时，即测试阶段，img 和 img_metas 应该是双层嵌套的（即 list[torch.Tensor] 和 list[list[dict]]），外层列表表示测试时的增强。
+        而当 return_loss=False 时，即测试阶段，会调用 forward_test,img 和 img_metas 应该是双层嵌套的（即 list[torch.Tensor] 和 list[list[dict]]），外层列表表示测试时的增强。
         """
         # 训练是需要返回loss，测试不需要
         if return_loss:
@@ -90,21 +95,23 @@ class UniAD(UniADTrack):
     @auto_fp16(apply_to=('img', 'points')) # 装饰器，自动将输入转换为fp16，提高训练效率，减少显存占用。
     def forward_train(self,
                       img=None,
-                      img_metas=None,
-                      gt_bboxes_3d=None,
+                      img_metas=None,#包含图像元数据的字典
+
+                      gt_bboxes_3d=None,#目标的 3D 边界框标签，表示目标在三维空间中的位置和尺寸。
                       gt_labels_3d=None,
-                      gt_inds=None,
-                      l2g_t=None,
-                      l2g_r_mat=None,
-                      timestamp=None,
-                      gt_lane_labels=None,
+                      gt_inds=None,#目标的索引
+                      l2g_t=None,#物体到全局坐标系的平移向量
+                      l2g_r_mat=None,#物体到全局坐标系的旋转矩阵
+
+                      timestamp=None,#时间戳
+                      gt_lane_labels=None,#车道标签
                       gt_lane_bboxes=None,
                       gt_lane_masks=None,
-                      gt_fut_traj=None,
+                      gt_fut_traj=None,#目标的未来轨迹
                       gt_fut_traj_mask=None,
                       gt_past_traj=None,
                       gt_past_traj_mask=None,
-                      gt_sdc_bbox=None,
+                      gt_sdc_bbox=None,#自驾车目标的边界框标签
                       gt_sdc_label=None,
                       gt_sdc_fut_traj=None,
                       gt_sdc_fut_traj_mask=None,
@@ -180,7 +187,7 @@ class UniAD(UniADTrack):
         #            "sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results", "sdc_embedding"]
         # 这里还要处理图片，还要BEV等等，因此写了一个专门的函数`forward_track_train`
         #* 本质是一整个Transformer的前向传播
-        #* encoder输出BEV特征
+        #* encoder输出BEV特征 
         #* decoder输出Trackformer的Query
         losses_track, outs_track = self.forward_track_train(img, gt_bboxes_3d, gt_labels_3d, gt_past_traj, gt_past_traj_mask, gt_inds, gt_sdc_bbox, gt_sdc_label,
                                                         l2g_t, l2g_r_mat, img_metas, timestamp)
@@ -215,6 +222,7 @@ class UniAD(UniADTrack):
             #* 输出: losses_motion, outs_motion, track_box 
             #* 其中outs_motion包含了motionformer的每一层decoder的Q_ctx，同时还将Q_ctx中自车的Q分离出来
             #? loss计算中使用了数值优化来平滑轨迹？？？？？？？？？？
+            
             ret_dict_motion = self.motion_head.forward_train(bev_embed,
                                                         gt_bboxes_3d, gt_labels_3d, 
                                                         gt_fut_traj, gt_fut_traj_mask, 
@@ -262,7 +270,7 @@ class UniAD(UniADTrack):
             losses[k] = torch.nan_to_num(v)
         return losses
     
-    def loss_weighted_and_prefixed(self, loss_dict, prefix=''):
+    def loss_weighted_and_prefixed(self, loss_dict, prefix=''):#对损失字典中的每个损失值按照特定的权重进行缩放，并为每个损失的名称添加一个前缀。
         loss_factor = self.task_loss_weight[prefix]
         loss_dict = {f"{prefix}.{k}" : v*loss_factor for k, v in loss_dict.items()}
         return loss_dict
